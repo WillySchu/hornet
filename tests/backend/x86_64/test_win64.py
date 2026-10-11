@@ -119,8 +119,8 @@ def test_windows_input_and_output_are_bytes(tmp_path):
     # Text mode would turn "\n" into "\r\n" going out, and drop "\r" and stop at 0x1A coming in.
     result = _build_and_run(
         tmp_path,
-        "from 'os' import get_args, read_file, read_stdin, write_file, write_stdout\n"
-        "from 'errors' import Error\n"
+        "from 'std:os' import get_args, read_file, read_stdin, write_file, write_stdout\n"
+        "from 'std:errors' import Error\n"
         "def int main(int argc, *byte argv):\n"
         "    []str args = get_args(argc, argv)\n"
         "    print(len(args))\n"

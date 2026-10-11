@@ -17,10 +17,10 @@ EVERY_BYTE = bytes(range(256)) * 4096  # 1 MB
 
 # METHOD URL HEADER TIMEOUT_MS [BODY]: the status line, the header's value, then the body. Or: url URL.
 CLIENT = """\
-from 'errors' import Error, must_int
-from 'fmt' import int_to_str, parse_int
-from 'http' import request, parse_url, Header, ResponseResult, UrlResult
-from 'os' import get_args, write_stdout
+from 'std:errors' import Error, must_int
+from 'std:fmt' import int_to_str, parse_int
+from 'std:http' import request, parse_url, Header, ResponseResult, UrlResult
+from 'std:os' import get_args, write_stdout
 
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)
@@ -45,9 +45,9 @@ def int main(int argc, *byte argv):
 """
 
 GET_AND_POST = """\
-from 'errors' import Error
-from 'http' import get, post, ResponseResult
-from 'os' import get_args
+from 'std:errors' import Error
+from 'std:http' import get, post, ResponseResult
+from 'std:os' import get_args
 
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)

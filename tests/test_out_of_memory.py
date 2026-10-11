@@ -17,9 +17,9 @@ from tests.targets import WINDOWS_ABORT_EXIT_CODE, each_runnable_target, run_bin
 from tests.test_compiler import GCC_SKIP, compile_and_run
 
 ROOT_OF_ALL = (
-    "from 'os' import read_stdin\n"
-    "from 'errors' import Error\n"
-    "from 'strings' import Builder, repeat\n"
+    "from 'std:os' import read_stdin\n"
+    "from 'std:errors' import Error\n"
+    "from 'std:strings' import Builder, repeat\n"
     "type Point struct:\n"
     "    int x\n"
     "    [3000]int big\n"

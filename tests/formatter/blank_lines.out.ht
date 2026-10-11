@@ -1,5 +1,5 @@
-import 'fmt'
-from 'c' import panic
+import 'std:fmt'
+from 'std:c' import panic
 
 extern int32 close(int32 fd)
 const int A = 1

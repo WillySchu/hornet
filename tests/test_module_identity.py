@@ -74,7 +74,7 @@ def test_a_file_named_like_a_standard_module_is_another_module(tmp_path):
     entry = _tree(
         tmp_path,
         errors="type Error struct:\n    int code\n\ndef Error mine():\n    return Error(7)\n",
-        main="from 'errors' import mine\nfrom 'fmt' import int_to_str\n\n"   # fmt uses the standard errors
+        main="from 'errors' import mine\nfrom 'std:fmt' import int_to_str\n\n"   # (fmt uses the library's errors)
              "def int main():\n    print(int_to_str(mine().code))\n    return 0\n")
     assert _run(entry) == "7\n"
     _, modules = discover_modules(entry)

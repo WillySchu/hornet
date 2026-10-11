@@ -17,9 +17,9 @@
 #
 # An error is reported as `file:line:col: error: message`, and the exit status is then 1. At the
 # prompt it is shown under the line instead.
-from 'os' import get_args, is_terminal, read_file, read_line, write_stderr, write_stdout
-from 'errors' import Error, StrResult
-from 'strings' import repeat, split, starts_with
+from 'std:os' import get_args, is_terminal, read_file, read_line, write_stderr, write_stdout
+from 'std:errors' import Error, StrResult
+from 'std:strings' import repeat, split, starts_with
 from 'lexer' import lex, LexError, Tokens
 from 'parser' import parse, ParseError, Statement
 from 'eval' import evaluate, EvalError

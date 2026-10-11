@@ -7,10 +7,10 @@
 #   --sort-keys    each object's members in the order of their keys
 #
 # An error is reported as `file:line:col: error: message`, and the exit status is then 1.
-from 'os' import get_args, read_file, read_stdin, write_stderr, write_stdout
-from 'errors' import Error, StrResult
-from 'fmt' import parse_int
-from 'strings' import starts_with
+from 'std:os' import get_args, read_file, read_stdin, write_stderr, write_stdout
+from 'std:errors' import Error, StrResult
+from 'std:fmt' import parse_int
+from 'std:strings' import starts_with
 from 'json' import parse, to_text, sort_keys, Document, ParseError, Layout, Value
 
 const str USAGE = 'usage: jsonfmt [--compact] [--indent N] [--sort-keys] [file]\n'

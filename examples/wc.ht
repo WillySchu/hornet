@@ -1,6 +1,6 @@
-from 'os' import get_args, read_file, read_stdin, write_stderr, exit
-from 'errors' import Error, StrResult
-from 'fmt' import int_to_str
+from 'std:os' import get_args, read_file, read_stdin, write_stderr, exit
+from 'std:errors' import Error, StrResult
+from 'std:fmt' import int_to_str
 
 # Simplified wc: lines, words, bytes per file plus a total; stdin if no files.
 

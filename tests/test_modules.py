@@ -307,46 +307,58 @@ def test_qualified_and_named_import_of_the_same_module_is_not_a_collision():
         assert entry_program.named_imports == {"add": ("utils", "add")}
 
 
-def test_fallback_reaches_the_stdlib_when_nothing_local_matches(monkeypatch, tmp_path):
-    """The core fallback mechanism (see modules.py's own module
-    docstring): a program with no local file matching the import path
-    still resolves correctly once a stdlib location has a matching
-    one. _STDLIB_ROOT is monkeypatched to an isolated temp directory
-    for this test, deliberately independent of whatever the real,
-    shipped stdlib happens to contain at any given time -- the real
-    stdlib's own content gets its own, separate tests."""
-    stdlib_dir = tmp_path / "fake_stdlib"
-    stdlib_dir.mkdir()
-    (stdlib_dir / "greet.ht").write_text("def int hello():\n    return 99\n")
-    monkeypatch.setattr(modules, "_STDLIB_ROOT", stdlib_dir)
+# -- `std:name` is the standard library's module; any other path is a file beside the importer.
+# Neither stands in for the other. (_STDLIB_ROOT is pointed at a directory of the test's own, so these
+# don't depend on what the real library holds.)
 
+def _library(monkeypatch, tmp_path, **files: str) -> Path:
+    library = tmp_path / "fake_stdlib"
+    library.mkdir()
+    for name, source in files.items():
+        (library / f"{name}.ht").write_text(source)
+    monkeypatch.setattr(modules, "_STDLIB_ROOT", library)
+    return library
+
+
+def test_the_standard_library_is_reached_by_its_prefix(monkeypatch, tmp_path):
+    library = _library(monkeypatch, tmp_path, greet="import 'polite'\n\ndef int hello():\n    return 99\n",
+                       polite="def int please():\n    return 1\n")
     with tempfile.TemporaryDirectory() as tmpdir:
-        entry = _write(tmpdir, "main.ht", "import 'greet'\n\ndef int main():\n    return greet.hello()\n")
+        entry = _write(tmpdir, "main.ht", "import 'std:greet'\nimport 'std:greet.ht' as again\n\n"
+                                           "def int main():\n    return greet.hello()\n")
         entry_program, discovered = discover_modules(entry)
-        assert set(discovered.keys()) == {"greet"}
-        assert discovered["greet"].file_path == (stdlib_dir / "greet.ht").resolve()
+        assert entry_program.import_aliases == {"greet": "greet", "again": "greet"}    # named by what follows it
+        assert discovered["greet"].file_path == (library / "greet.ht").resolve()
+        # One of the library's modules imports another as a file beside it.
+        assert discovered["greet"].import_aliases == {"polite": "polite"}
 
 
-def test_local_file_takes_priority_over_the_stdlib_even_when_both_exist():
-    """The other half of fallback semantics: relative resolution
-    takes UNCONDITIONAL priority. A local file with the same name as
-    a stdlib module is always what a bare import reaches -- never
-    silently shadowed. Uses the real _STDLIB_ROOT deliberately (not
-    monkeypatched) specifically to confirm this against the real,
-    shipped 'c' module: a local file also named c.ht must still win."""
+def test_a_bare_path_is_never_the_standard_library(monkeypatch, tmp_path):
+    _library(monkeypatch, tmp_path, greet="def int hello():\n    return 99\n")
     with tempfile.TemporaryDirectory() as tmpdir:
-        entry = _write(tmpdir, "main.ht", "import 'c'\n\ndef int main():\n    return c.localOnly()\n")
-        _write(tmpdir, "c.ht", "def int localOnly():\n    return 7\n")
+        entry = _write(tmpdir, "main.ht", "import 'greet'\n\ndef int main():\n    return 0\n")
+        with pytest.raises(ModuleError, match=r"Import 'greet' .*doesn't resolve to a real file \(looked for .*greet"
+                                              r"\.ht; the standard library's module is imported as 'std:greet'\)"):
+            discover_modules(entry)
+        # With a file of that name beside it, that file is what it means, and the library's is still its own.
+        _write(tmpdir, "greet.ht", "def int local():\n    return 7\n")
+        entry = _write(tmpdir, "main.ht", "import 'greet'\nimport 'std:greet' as standard\n\n"
+                                           "def int main():\n    return 0\n")
         entry_program, discovered = discover_modules(entry)
-        assert discovered["c"].file_path == (Path(tmpdir) / "c.ht").resolve()
+        files = {name: module.file_path.parent.name for name, module in discovered.items()}
+        assert sorted(files.values()) == sorted(["fake_stdlib", Path(tmpdir).resolve().name])
+        assert len(set(entry_program.import_aliases.values())) == 2
 
 
-def test_nonexistent_path_checks_both_locations_before_failing(monkeypatch, tmp_path):
-    stdlib_dir = tmp_path / "fake_stdlib"
-    stdlib_dir.mkdir()
-    monkeypatch.setattr(modules, "_STDLIB_ROOT", stdlib_dir)
-
+@pytest.mark.parametrize("path,reason", [
+    ("std:nowhere", r"the standard library has no module 'nowhere'; it has greet\)"),
+    ("std:", r"the standard library has no module ''"),
+    ("std:../main", r"the standard library has no module '../main'"),       # nothing outside it, by any path
+    ("nowhere", r"\(looked for [^;]*nowhere\.ht\)"),
+])
+def test_what_resolves_to_nothing(monkeypatch, tmp_path, path, reason):
+    _library(monkeypatch, tmp_path, greet="def int hello():\n    return 99\n")
     with tempfile.TemporaryDirectory() as tmpdir:
-        entry = _write(tmpdir, "main.ht", "import 'nowhere'\n\ndef int main():\n    return 0\n")
-        with pytest.raises(ModuleError, match="doesn't resolve to a real file"):
+        entry = _write(tmpdir, "main.ht", f"import '{path}' as m\n\ndef int main():\n    return 0\n")
+        with pytest.raises(ModuleError, match="doesn't resolve to a real file .*" + reason):
             discover_modules(entry)

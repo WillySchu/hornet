@@ -117,7 +117,7 @@ def test_an_imported_module_costs_what_is_used_of_it(tmp_path):
     assert "lib$wanted:" in asm and "lib$_inner:" in asm and "unwanted" not in asm
     # The standard library, likewise: a program that only prints through `os` has none of the rest.
     (tmp_path / "hello.ht").write_text(
-        "from 'os' import write_stdout\n\ndef int main():\n    write_stdout('hi\\n')\n    return 0\n")
+        "from 'std:os' import write_stdout\n\ndef int main():\n    write_stdout('hi\\n')\n    return 0\n")
     hello = compile_to_asm(str(tmp_path / "hello.ht"))
     assert "os$write_stdout:" in hello and "os$read_file" not in hello and "isatty" not in hello
     assert "hornet_is_terminal" not in hello and "strings$" not in hello

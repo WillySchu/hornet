@@ -4,8 +4,8 @@ from tests.targets import build_and_run, on_every_target
 from tests.test_compiler import GCC_SKIP
 
 ECHO = (
-    "from 'os' import read_line, read_stdin, is_terminal\n"
-    "from 'errors' import Error\n"
+    "from 'std:os' import read_line, read_stdin, is_terminal\n"
+    "from 'std:errors' import Error\n"
     "def int main():\n"
     "    print(is_terminal(0))\n"
     "    int lines = 0\n"

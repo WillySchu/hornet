@@ -6,8 +6,8 @@ from tests.test_compiler import GCC_SKIP
 from tests.test_os_output import compile_and_run
 
 _IMPORTS = (
-    "from 'strings' import Builder, split, join, trim, repeat, starts_with, ends_with, index_of, index_of_byte\n"
-    "from 'fmt' import int_to_str, int_to_hex, pad_left\n"
+    "from 'std:strings' import Builder, split, join, trim, repeat, starts_with, ends_with, index_of, index_of_byte\n"
+    "from 'std:fmt' import int_to_str, int_to_hex, pad_left\n"
 )
 
 

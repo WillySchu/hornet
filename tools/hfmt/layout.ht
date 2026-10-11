@@ -1,6 +1,6 @@
 # Indentation and spacing. Line breaks stay where they are; tokens are
 # re-joined with canonical spacing and each line is re-indented.
-from 'strings' import Builder, trim
+from 'std:strings' import Builder, trim
 from 'lexer' import Token, TokenKind
 
 const int INDENT = 4

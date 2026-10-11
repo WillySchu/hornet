@@ -70,6 +70,8 @@ def module_names(files: List[Path]) -> Dict[Path, str]:
 
 
 _STDLIB_ROOT = Path(__file__).parent / 'stdlib'
+# An import's path that starts with this names a module of the standard library; any other is a file's.
+STD_PREFIX = 'std:'
 
 
 def _candidate_path(base_dir: Path, path: str) -> Path:
@@ -80,15 +82,33 @@ def _candidate_path(base_dir: Path, path: str) -> Path:
     return (base_dir / name).resolve()
 
 
+def _standard_module(name: str) -> Optional[Path]:
+    """The standard library's module `name` (what follows `std:`), if it has one. Nothing outside the
+    library is reached this way, whatever the name."""
+    root = _STDLIB_ROOT.resolve()
+    candidate = _candidate_path(root, name)
+    return candidate if root in candidate.parents and candidate.is_file() else None
+
+
 def _resolve_import_path(importer_dir: Path, path: str) -> Optional[Path]:
-    """Resolve relative to the importing file, then fall back to _STDLIB_ROOT."""
+    """`std:name` is the standard library's; any other path is a file's, relative to the importing
+    file. Neither stands in for the other."""
+    if path.startswith(STD_PREFIX):
+        return _standard_module(path[len(STD_PREFIX):])
     local = _candidate_path(importer_dir, path)
-    if local.is_file():
-        return local
-    stdlib_candidate = _candidate_path(_STDLIB_ROOT, path)
-    if stdlib_candidate.is_file():
-        return stdlib_candidate
-    return None
+    return local if local.is_file() else None
+
+
+def _not_found(importer_dir: Path, path: str) -> str:
+    """Why `path` resolved to nothing, and what may have been meant."""
+    if path.startswith(STD_PREFIX):
+        name = path[len(STD_PREFIX):]
+        has = sorted(file.stem for file in _STDLIB_ROOT.glob('*.ht'))
+        return f"the standard library has no module {quoted_text(name)}; it has {', '.join(has)}"
+    looked = f"looked for {path_text(_candidate_path(importer_dir, path))}"
+    if _standard_module(path) is not None:
+        return f"{looked}; the standard library's module is imported as {quoted_text(STD_PREFIX + path)}"
+    return looked
 
 
 def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModule]]:
@@ -112,8 +132,7 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
             if resolved is None:
                 raise ModuleError(
                     f"Import {quoted_text(path)} at line {at_line} doesn't resolve to a real "
-                    f"file (looked for {path_text(_candidate_path(importer_dir, path))}, or in "
-                    f"the standard library)",
+                    f"file ({_not_found(importer_dir, path)})",
                     file=program.file, line=at_line, col=decl.col,
                 )
             if resolved == entry_file:  # it would be compiled a second time, as a module

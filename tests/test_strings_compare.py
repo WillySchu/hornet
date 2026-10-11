@@ -11,7 +11,7 @@ PAIRS = [("", ""), ("a", "a"), ("a", "b"), ("b", "a"), ("ab", "a"), ("a", "ab"),
 def test_compare_orders_like_bytes():
     calls = "".join(f"    print(sign(compare('{a}', '{b}')))\n" for a, b in PAIRS)
     source = (
-        "from 'strings' import compare\n"
+        "from 'std:strings' import compare\n"
         "def int sign(int n):\n"
         "    if n < 0:\n"
         "        return -1\n"

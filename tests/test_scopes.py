@@ -678,7 +678,7 @@ def test_stdlib_c_module_round_trips_a_str_through_a_c_string():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'c'\n\n"
+            "import 'std:c'\n\n"
             "def int main():\n"
             "    str s = 'hello world'\n"
             "    *byte cstr = c.to_cstring(s)\n"
@@ -695,7 +695,7 @@ def test_stdlib_c_module_round_trips_an_empty_string():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'c'\n\n"
+            "import 'std:c'\n\n"
             "def int main():\n"
             "    str empty = ''\n"
             "    *byte cstr = c.to_cstring(empty)\n"
@@ -715,7 +715,7 @@ def test_stdlib_c_module_embedded_null_truncates_as_expected_for_c_strings():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'c'\n\n"
+            "import 'std:c'\n\n"
             "def int main():\n"
             "    str withNul = 'abc\\0xyz'\n"
             "    *byte cstr = c.to_cstring(withNul)\n"
@@ -737,7 +737,7 @@ def test_stdlib_c_modules_raw_intrinsics_are_hidden():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'c'\n\n"
+            "import 'std:c'\n\n"
             "def int main():\n"
             "    str s = 'hello'\n"
             "    *byte p = c._raw_ptr(s)\n"
@@ -806,7 +806,7 @@ def test_stdlib_hash_module_hash_int64_directly_with_value_exceeding_int32_range
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    print(hash.hash_int64(9223372036854775000))\n"
             "    return 0\n",
@@ -821,7 +821,7 @@ def test_stdlib_hash_module_hash_str_known_answer():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    print(hash.hash_str('hello'))\n"
             "    return 0\n",
@@ -835,7 +835,7 @@ def test_stdlib_hash_module_hash_str_empty_string():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    print(hash.hash_str(''))\n"
             "    return 0\n",
@@ -848,7 +848,7 @@ def test_stdlib_hash_module_hash_int_positive_and_negative():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    print(hash.hash_int(42))\n"
             "    print(hash.hash_int(-42))\n"
@@ -862,7 +862,7 @@ def test_stdlib_hash_module_hash_bool():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    print(hash.hash_bool(true))\n"
             "    print(hash.hash_bool(false))\n"
@@ -877,7 +877,7 @@ def test_stdlib_hash_module_hash_byte():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    print(hash.hash_byte(\"\\xff\"))\n"
             "    print(hash.hash_byte(\"\\x00\"))\n"
@@ -891,7 +891,7 @@ def test_stdlib_hash_module_equal_inputs_hash_equal():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    if hash.hash_str('same') == hash.hash_str('same'):\n"
             "        return 1\n"
@@ -905,7 +905,7 @@ def test_stdlib_hash_module_different_strings_hash_differently():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'hash'\n\n"
+            "import 'std:hash'\n\n"
             "def int main():\n"
             "    if hash.hash_str('abc') == hash.hash_str('abd'):\n"
             "        return 0\n"
@@ -924,7 +924,7 @@ def test_stdlib_os_module_get_args_count_and_values():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import get_args\n\n"
+            "from 'std:os' import get_args\n\n"
             "def int main(int argc, *byte argv):\n"
             "    []str args = get_args(argc, argv)\n"
             "    print(len(args))\n"
@@ -940,7 +940,7 @@ def test_stdlib_os_module_get_args_with_no_extra_arguments():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import get_args\n\n"
+            "from 'std:os' import get_args\n\n"
             "def int main(int argc, *byte argv):\n"
             "    []str args = get_args(argc, argv)\n"
             "    print(len(args))\n"
@@ -960,7 +960,7 @@ def test_stdlib_os_module_get_args_preserves_an_argument_containing_spaces():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import get_args\n\n"
+            "from 'std:os' import get_args\n\n"
             "def int main(int argc, *byte argv):\n"
             "    []str args = get_args(argc, argv)\n"
             "    print(args[1])\n"
@@ -975,7 +975,7 @@ def test_stdlib_os_module_read_file_reads_a_real_file():
         data_path = _write(tmpdir, "data.txt", "line one\nline two\nline three")
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file\nfrom 'errors' import must_str\n\n"
+            "from 'std:os' import read_file\nfrom 'std:errors' import must_str\n\n"
             "def int main():\n"
             f"    str contents = must_str(read_file('{data_path}'))\n"
             "    print(len(contents))\n"
@@ -996,7 +996,7 @@ def test_stdlib_os_module_read_file_handles_a_file_larger_than_one_chunk():
         data_path = _write(tmpdir, "big.txt", big_content)
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file\nfrom 'errors' import must_str\n\n"
+            "from 'std:os' import read_file\nfrom 'std:errors' import must_str\n\n"
             "def int main():\n"
             f"    str contents = must_str(read_file('{data_path}'))\n"
             "    print(len(contents))\n"
@@ -1011,7 +1011,7 @@ def test_stdlib_os_module_read_file_returns_an_error_for_a_missing_file():
         missing_path = str(Path(tmpdir) / "does_not_exist.txt")
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file\nfrom 'errors' import Error, StrResult, must_str\n\n"
+            "from 'std:os' import read_file\nfrom 'std:errors' import Error, StrResult, must_str\n\n"
             "def int main():\n"
             f"    StrResult r = read_file('{missing_path}')\n"
             "    if r is Error:\n"
@@ -1029,7 +1029,7 @@ def test_stdlib_os_module_read_stdin_reads_piped_input():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_stdin\nfrom 'errors' import must_str\n\n"
+            "from 'std:os' import read_stdin\nfrom 'std:errors' import must_str\n\n"
             "def int main():\n"
             "    str contents = must_str(read_stdin())\n"
             "    print(len(contents))\n"
@@ -1046,7 +1046,7 @@ def test_stdlib_os_module_read_stdin_with_no_input_reads_empty():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_stdin\nfrom 'errors' import must_str\n\n"
+            "from 'std:os' import read_stdin\nfrom 'std:errors' import must_str\n\n"
             "def int main():\n"
             "    str contents = must_str(read_stdin())\n"
             "    print(len(contents))\n"
@@ -1066,7 +1066,7 @@ def test_stdlib_os_module_read_file_and_read_stdin_share_read_all_from_fd():
         data_path = _write(tmpdir, "data.txt", content)
         entry = _write(
             tmpdir, "main.ht",
-            "from 'os' import read_file, read_stdin, get_args\nfrom 'errors' import must_str\n\n"
+            "from 'std:os' import read_file, read_stdin, get_args\nfrom 'std:errors' import must_str\n\n"
             "def int main(int argc, *byte argv):\n"
             "    []str args = get_args(argc, argv)\n"
             "    str contents = ''\n"
@@ -1087,7 +1087,7 @@ def test_stdlib_fmt_module_int_to_str_known_values():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'fmt' import int_to_str\n\n"
+            "from 'std:fmt' import int_to_str\n\n"
             "def int main():\n"
             "    print(int_to_str(0))\n"
             "    print(int_to_str(7))\n"
@@ -1106,7 +1106,7 @@ def test_stdlib_fmt_module_int_to_str_result_is_an_ordinary_str():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'fmt' import int_to_str\n\n"
+            "from 'std:fmt' import int_to_str\n\n"
             "def int main():\n"
             "    print(int_to_str(3) + ' lines')\n"
             "    return 0\n",
@@ -1119,7 +1119,7 @@ def test_stdlib_fmt_module_int_to_str_formats_a_negative_number():
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "from 'fmt' import int_to_str\n\n"
+            "from 'std:fmt' import int_to_str\n\n"
             "def int main():\n"
             "    print(int_to_str(0 - 5))\n"
             "    return 0\n",

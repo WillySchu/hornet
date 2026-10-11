@@ -7,7 +7,7 @@ from tests.test_compiler import GCC_SKIP
 @GCC_SKIP
 def test_quoted():
     source = (
-        "from 'strings' import quoted\n"
+        "from 'std:strings' import quoted\n"
         "def int main():\n"
         "    print(quoted('plain'))\n"
         "    print(quoted(''))\n"

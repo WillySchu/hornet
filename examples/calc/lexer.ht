@@ -1,6 +1,6 @@
 # The tokens of one line of calculator input.
-from 'errors' import Error
-from 'fmt' import parse_int
+from 'std:errors' import Error
+from 'std:fmt' import parse_int
 
 type TokenKind enum:
     Number

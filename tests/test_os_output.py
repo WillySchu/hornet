@@ -23,8 +23,8 @@ def compile_and_run(source: str, only=None) -> subprocess.CompletedProcess:
 
 def _run(body: str, only=None):
     return compile_and_run(
-        "from 'os' import write_stdout, write_stderr, write_file, read_file, exit\n"
-        "from 'errors' import Error, StrResult, IntResult, must_str, must_int\n"
+        "from 'std:os' import write_stdout, write_stderr, write_file, read_file, exit\n"
+        "from 'std:errors' import Error, StrResult, IntResult, must_str, must_int\n"
         "def int main():\n" + ''.join(f"    {line}\n" for line in body.strip('\n').split('\n')), only)
 
 
@@ -69,7 +69,7 @@ def test_write_file_truncates_and_handles_large_content(tmp_path):
 @GCC_SKIP
 def test_exit_sets_code_and_keeps_earlier_output():
     r = compile_and_run(
-        "from 'os' import write_stdout, exit\n"
+        "from 'std:os' import write_stdout, exit\n"
         "def stop(int code):\n"
         "    write_stdout('bye')\n"
         "    exit(code)\n"
@@ -117,8 +117,8 @@ def test_files_are_closed_however_reading_or_writing_them_ends(tmp_path):
     # file must have been closed again, on the paths that fail as on those that succeed.
     path, missing = tmp_path / 'again.txt', tmp_path / 'no-such-directory' / 'x'
     source = (
-        "from 'os' import write_file, read_file\n"
-        "from 'errors' import Error, StrResult, IntResult\n"
+        "from 'std:os' import write_file, read_file\n"
+        "from 'std:errors' import Error, StrResult, IntResult\n"
         "def int main():\n"
         "    int done = 0\n"
         "    for int i = 0; i < 300; i += 1:\n"

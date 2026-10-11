@@ -120,7 +120,7 @@ def test_an_import_s_path_is_the_file_s_name(tmp_path):
     assert _compile(path).returncode == 0
     missing = _compile(_file(tmp_path, b"import '" + NAMED + b"/absent'\n\ndef int main():\n    return 0\n", "q.ht"))
     assert missing.returncode == 1
-    assert b"(looked for " + bytes(tmp_path.resolve() / NAMED.decode() / "absent.ht") + b", or in" in missing.stderr
+    assert b"(looked for " + bytes(tmp_path.resolve() / NAMED.decode() / "absent.ht") + b")" in missing.stderr
 
 
 def test_a_diagnostic_names_its_file_by_the_name_s_bytes(tmp_path):

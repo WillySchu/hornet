@@ -1,5 +1,5 @@
 # Symbol-table-style dict work: int and str keys, insert/delete/lookup/iterate.
-from 'fmt' import int_to_str
+from 'std:fmt' import int_to_str
 
 def int main():
     int checksum = 0

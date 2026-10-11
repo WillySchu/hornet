@@ -1,8 +1,8 @@
 # fetch URL: write the body of an http:// URL to standard output, and its status line to standard error.
-from 'errors' import Error
-from 'fmt' import int_to_str
-from 'http' import get, ResponseResult
-from 'os' import get_args, write_stderr, write_stdout
+from 'std:errors' import Error
+from 'std:fmt' import int_to_str
+from 'std:http' import get, ResponseResult
+from 'std:os' import get_args, write_stderr, write_stdout
 
 def int main(int argc, *byte argv):
     []str args = get_args(argc, argv)

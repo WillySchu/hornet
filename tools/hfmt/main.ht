@@ -5,10 +5,10 @@
 #   hfmt --check file ...  list files that would change; exit 1 if any
 #   hfmt --tokens [file]   dump the token stream
 # Flags may appear anywhere among the arguments. A file keeps its line endings ("\n" or "\r\n").
-from 'os' import get_args, read_file, read_stdin, write_file, write_stdout, write_stderr, exit
-from 'errors' import Error, StrResult, IntResult
-from 'fmt' import int_to_str
-from 'strings' import Builder, starts_with
+from 'std:os' import get_args, read_file, read_stdin, write_file, write_stdout, write_stderr, exit
+from 'std:errors' import Error, StrResult, IntResult
+from 'std:fmt' import int_to_str
+from 'std:strings' import Builder, starts_with
 from 'lexer' import lex, kind_name, LexError, Tokens, TokenKind
 from 'layout' import layout, LayoutError
 

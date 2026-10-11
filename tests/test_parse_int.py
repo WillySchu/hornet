@@ -18,8 +18,8 @@ CASES = [
 def test_parse_int():
     calls = "".join(f"    show(parse_int('{text}'))\n" for text, _ in CASES)
     source = (
-        "from 'fmt' import parse_int\n"
-        "from 'errors' import Error, IntResult\n"
+        "from 'std:fmt' import parse_int\n"
+        "from 'std:errors' import Error, IntResult\n"
         "def show(IntResult r):\n"
         "    match r as v:\n"
         "        is int:\n"

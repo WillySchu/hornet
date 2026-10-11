@@ -1080,7 +1080,7 @@ A missing key panics, naming the key.
 
 # Modules and Imports
 
-A module is currently one `.ht` source file, named by that file: the name (without `.ht`) must be an identifier, and unique among the program's modules. The entry file can't be imported.
+A module is one `.ht` source file, named by that file: the name (without `.ht`) must be an identifier. Two files with the same name in different directories are different modules. The entry file can't be imported.
 
 Import a module and access its exported declarations through a qualifier:
 
@@ -1090,7 +1090,7 @@ import 'utils'
 int value = utils.add(2, 3)
 ```
 
-Rename the module qualifier explicitly:
+Rename the module qualifier explicitly, as two modules of the same name imported into one file need:
 
 ```hornet
 import 'utilities/string_helpers' as strings
@@ -1114,11 +1114,18 @@ Multiple names may be imported in one declaration:
 from 'utils' import add, other as renamed
 ```
 
-Module discovery follows imports transitively. Local modules are resolved relative to the importing file, and the compiler can fall back to the bundled `stdlib/` directory.
+A path is relative to the importing file (`'../lib/shared'` goes up a directory), and a file is one module however it is reached. The standard library is imported with the `std:` prefix, and only that way: `'os'` is the `os.ht` beside the importing file, and `'std:os'` is the standard library's.
+
+```hornet
+from 'std:os' import write_stdout
+import 'std:strings'                  # strings.repeat(...)
+```
+
+Module discovery follows imports transitively.
 
 Top-level names beginning with `_` are private to their module, as are a struct's fields and methods (see [Structs and Methods](#structs-and-methods)) and an enum's methods.
 
-Every declaration is reached this way, including `extern` functions: a module that uses another module's `extern` imports it (`from 'os' import write_fd`) or qualifies it (`os.write_fd(...)`). A local variable, parameter, or loop binding can't have the name of an import alias or a constant in scope.
+Every declaration is reached this way, including `extern` functions: a module that uses another module's `extern` imports it (`from 'std:os' import write_fd`) or qualifies it (`os.write_fd(...)`). A local variable, parameter, or loop binding can't have the name of an import alias or a constant in scope.
 
 Each file's names are resolved in that file's own scope. Internally every declaration of an imported module gets a program-wide unique name, while `extern` symbols keep their foreign names for the linker; errors and printed values use names as declared. A function in the entry file is linked as `name$` (`main` keeps its name), so it never collides with a libc or runtime symbol.
 
@@ -1162,7 +1169,7 @@ The standard library uses these facilities to build C interoperability helpers.
 
 # Standard Library
 
-The bundled `stdlib/` directory is intentionally small and is beginning to provide the facilities needed by real command-line programs.
+The bundled `stdlib/` directory is intentionally small and is beginning to provide the facilities needed by real command-line programs. Its modules are imported as `'std:name'`: `stdlib/os.ht` is `'std:os'`.
 
 ## `stdlib/c.ht`
 
@@ -1438,8 +1445,8 @@ The repository includes `examples/wc.ht`, a small word/line/byte counting progra
 A simplified version looks like:
 
 ```hornet
-from 'os' import get_args, read_file, read_stdin, write_stderr, exit
-from 'errors' import Error, StrResult
+from 'std:os' import get_args, read_file, read_stdin, write_stderr, exit
+from 'std:errors' import Error, StrResult
 
 def str contents_or_exit(StrResult r):
     match r as v:

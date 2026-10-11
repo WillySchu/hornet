@@ -1,6 +1,7 @@
 """Declarations: a file from its top, and each thing declared there: imports, constants, types
 (structs, enums, sum types, aliases), functions and methods, externs and intrinsics."""
 
+import re
 from typing import List, Tuple, Union
 
 from lexer import Token, TokenType
@@ -13,8 +14,8 @@ from parser.stream import TokenStream
 
 
 def _default_import_qualifier(path: str) -> str:
-    """Last path component, minus '.ht'."""
-    last_component = path.rsplit('/', 1)[-1]
+    """Last path component, minus '.ht': what follows the last '/', or the ':' of `std:name`."""
+    last_component = re.split('[/:]', path)[-1]
     if last_component.endswith('.ht'):
         last_component = last_component[:-len('.ht')]
     return last_component
