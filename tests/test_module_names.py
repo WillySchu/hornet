@@ -83,7 +83,7 @@ def test_two_modules_declaring_one_extern(tmp_path):
 
 @pytest.mark.parametrize("main,match", [
     ("\nimport 'missing'\n", "doesn't resolve to a real file"),
-    ("\nimport 'lib'\nimport 'other/lib' as lib2\n", "Two different files both resolve to module name 'lib'"),
+    ("import 'lib'\nimport 'other/lib'\n", "both use the name 'lib'"),     # (two files: tests/test_module_identity.py)
     ("import 'lib'\nimport 'second' as lib\n", "both use the name 'lib'"),
     ("import 'lib'\nfrom 'second' import g as lib\n", "collides with an 'import ... as lib'"),
     ("from 'lib' import f\nfrom 'second' import g as f\n", "imported more than once"),

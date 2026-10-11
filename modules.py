@@ -1,10 +1,11 @@
-"""Module discovery: resolve and parse every file the entry file transitively imports. One module per file."""
+"""Module discovery: resolve and parse every file the entry file transitively imports. One module per
+file, and a file is one module however many imports reach it, by whatever paths."""
 
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from diagnostics import CompileError, path_text, quoted_text
 from lexer import lex
@@ -24,13 +25,48 @@ class ModuleError(CompileError):
 
 @dataclass
 class DiscoveredModule:
-    """One imported file, parsed. canonical_name is the file's name without `.ht`: an identifier, unique
-    among the program's modules."""
+    """One imported file, parsed. canonical_name is what the program knows the module by, unique among
+    its modules (module_names): it starts every key of the module's declarations. `name` is the
+    file's own, without `.ht`: an identifier, and what the module is called to the user."""
     canonical_name: str
     file_path: Path
     program: Program
     import_aliases: Dict[str, str] = field(default_factory=dict)
     named_imports: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+
+    @property
+    def name(self) -> str:
+        return self.file_path.stem
+
+
+def _name_part(directory: str) -> str:
+    """A directory's name as part of a module's: what a symbol can't hold becomes `_`."""
+    part = re.sub(r'[^A-Za-z0-9_]', '_', directory)
+    return part if re.match(r'[A-Za-z_]', part) else f"_{part}"
+
+
+def module_names(files: List[Path]) -> Dict[Path, str]:
+    """What each of a program's module files is known by: its name without `.ht`; or, where several
+    files have that name, each with as many of its directories before it as tell them apart, joined
+    by `$` (`net$util`, `db$util`). No two are the same, and none depends on the order of `files`."""
+    same_name: Dict[str, List[Path]] = {}
+    for path in files:
+        same_name.setdefault(path.stem, []).append(path)
+    names: Dict[Path, str] = {}
+    for stem, paths in same_name.items():
+        if len(paths) == 1:
+            names[paths[0]] = stem
+            continue
+        deepest = max(len(path.parent.parts) for path in paths)
+        for depth in range(1, deepest + 1):
+            told_apart = {path: '$'.join([_name_part(d) for d in path.parent.parts[-depth:]] + [stem])
+                          for path in paths}
+            if len(set(told_apart.values())) == len(paths):
+                break
+        else:  # directories that differ only in what a symbol can't hold: numbered, in the paths' order
+            told_apart = {path: f"{told_apart[path]}${n}" for n, path in enumerate(sorted(paths), start=1)}
+        names.update(told_apart)
+    return names
 
 
 _STDLIB_ROOT = Path(__file__).parent / 'stdlib'
@@ -60,15 +96,17 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
     entry_file = Path(entry_path).resolve()
     entry_program = Parser(lex(str(entry_file))).parse_program()
 
-    modules: Dict[str, DiscoveredModule] = {}  # canonical_name -> module
-    by_path: Dict[Path, str] = {}  # path -> canonical_name; also the visited/in-progress set
+    # Until every file is found, a module is known by its file: what it is to be called depends on
+    # the others (module_names).
+    found: Dict[Path, DiscoveredModule] = {}  # in the order their own imports were finished with
+    visited = set()  # also those in progress, so that cycles terminate
 
-    def _visit(program: Program, importer_dir: Path) -> Tuple[Dict[str, str], Dict[str, Tuple[str, str]]]:
-        """Returns (alias -> canonical_name, local_alias -> (canonical_name, original_name))."""
-        aliases: Dict[str, str] = {}
-        named: Dict[str, Tuple[str, str]] = {}
+    def _visit(program: Program, importer_dir: Path) -> Tuple[Dict[str, Path], Dict[str, Tuple[Path, str]]]:
+        """Returns (alias -> module's file, local_alias -> (module's file, original_name))."""
+        aliases: Dict[str, Path] = {}
+        named: Dict[str, Tuple[Path, str]] = {}
 
-        def _resolve_and_discover(decl) -> str:
+        def _resolve_and_discover(decl) -> Path:
             path, at_line = decl.path, decl.line
             resolved = _resolve_import_path(importer_dir, path)
             if resolved is None:
@@ -84,45 +122,36 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
                     f"imported -- move what is shared into a module of its own",
                     file=program.file, line=at_line, col=decl.col,
                 )
-            if resolved in by_path:
-                return by_path[resolved]
-            canonical_name = resolved.stem
-            if not _MODULE_NAME.fullmatch(canonical_name):  # it becomes part of every symbol of the module
+            if resolved in visited:
+                return resolved
+            if not _MODULE_NAME.fullmatch(resolved.stem):  # it becomes part of every symbol of the module
                 raise ModuleError(
                     f"Import {quoted_text(path)} is the file {quoted_text(path_text(resolved.name))}, and a module "
-                    f"is named by its file: {quoted_text(path_text(canonical_name))} must be an identifier "
+                    f"is named by its file: {quoted_text(path_text(resolved.stem))} must be an identifier "
                     f"(letters, digits, and underscores, not starting with a digit) -- rename the file",
                     file=program.file, line=decl.line, col=decl.col,
                 )
-            if canonical_name in modules or canonical_name in by_path.values():
-                raise ModuleError(
-                    f"Two different files both resolve to module name "
-                    f"{canonical_name!r} -- module names must be globally "
-                    f"unique across every imported file; rename one of them "
-                    f"(the second is {path_text(resolved)})",
-                    file=program.file, line=decl.line, col=decl.col,
-                )
-            by_path[resolved] = canonical_name  # Reserved before recursing so cycles terminate.
+            visited.add(resolved)
             sub_program = Parser(lex(str(resolved))).parse_program()
             sub_aliases, sub_named = _visit(sub_program, resolved.parent)
-            modules[canonical_name] = DiscoveredModule(
-                canonical_name=canonical_name, file_path=resolved, program=sub_program,
+            found[resolved] = DiscoveredModule(
+                canonical_name='', file_path=resolved, program=sub_program,
                 import_aliases=sub_aliases, named_imports=sub_named,
             )
-            return canonical_name
+            return resolved
 
         for decl in program.imports:
-            canonical_name = _resolve_and_discover(decl)
-            if decl.qualifier in aliases and aliases[decl.qualifier] != canonical_name:
+            module = _resolve_and_discover(decl)
+            if decl.qualifier in aliases and aliases[decl.qualifier] != module:
                 raise ModuleError(
                     f"Two imports at line {decl.line} both use the name "
                     f"{decl.qualifier!r} -- give one an explicit 'as' alias",
                     file=program.file, line=decl.line, col=decl.col,
                 )
-            aliases[decl.qualifier] = canonical_name
+            aliases[decl.qualifier] = module
 
         for from_decl in program.from_imports:
-            canonical_name = _resolve_and_discover(from_decl)
+            module = _resolve_and_discover(from_decl)
             for original_name, local_alias in from_decl.names:
                 if local_alias in aliases:
                     raise ModuleError(
@@ -131,17 +160,29 @@ def discover_modules(entry_path: str) -> Tuple[Program, Dict[str, DiscoveredModu
                         f"give one of them a different name",
                         file=program.file, line=from_decl.line, col=from_decl.col,
                     )
-                if local_alias in named and named[local_alias] != (canonical_name, original_name):
+                if local_alias in named and named[local_alias] != (module, original_name):
                     raise ModuleError(
                         f"'{local_alias}' at line {from_decl.line} is imported more than "
                         f"once under that name -- give one an explicit 'as' alias",
                         file=program.file, line=from_decl.line, col=from_decl.col,
                     )
-                named[local_alias] = (canonical_name, original_name)
+                named[local_alias] = (module, original_name)
 
         return aliases, named
 
     entry_aliases, entry_named = _visit(entry_program, entry_file.parent)
-    entry_program.import_aliases = entry_aliases
-    entry_program.named_imports = entry_named
+
+    # Every file is found: each gets its name, and what was known by file is known by name.
+    names = module_names(list(found))
+
+    def by_name(aliases: Dict[str, Path], named: Dict[str, Tuple[Path, str]]) -> tuple:
+        return ({alias: names[file] for alias, file in aliases.items()},
+                {local: (names[file], original) for local, (file, original) in named.items()})
+
+    modules: Dict[str, DiscoveredModule] = {}
+    for file, module in found.items():
+        module.canonical_name = names[file]
+        module.import_aliases, module.named_imports = by_name(module.import_aliases, module.named_imports)
+        modules[names[file]] = module
+    entry_program.import_aliases, entry_program.named_imports = by_name(entry_aliases, entry_named)
     return entry_program, modules

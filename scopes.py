@@ -1,7 +1,9 @@
 """Module scopes: what each name means in each file, across modules, without changing any tree.
 
 Every top-level declaration gets a program-wide unique key: its own name in the entry file, and
-`module$name` in an imported module ('$' can't appear in identifiers; '.' is taken by methods).
+`module$name` in an imported module ('$' can't appear in identifiers; '.' is taken by methods),
+`module` being what the program knows the module by (modules.module_names): the name is what
+follows the last '$'.
 Externs keep their names, which are linker symbols. A file's scope maps the bare names it can use
 (its own declarations and `from ... import` names) to keys; `alias.name` references are resolved
 here too, recorded by node number, along with the checks on imports and on names that locals may
@@ -117,9 +119,9 @@ def build_module_set(entry: Program, modules: Dict[str, DiscoveredModule]) -> Mo
             return name
         if name not in own[module]:
             raise MergeError(f"'{name}' at line {at.line} is not declared in module "
-                             f"{target.canonical_name!r} ({path_text(target.file_path)})", line=at.line, col=at.col)
+                             f"{target.name!r} ({path_text(target.file_path)})", line=at.line, col=at.col)
         if name.startswith('_') and referencing != module:
-            raise MergeError(f"'{module}.{name}' at line {at.line} is not visible outside the module that "
+            raise MergeError(f"'{target.name}.{name}' at line {at.line} is not visible outside the module that "
                              f"defines it -- names starting with '_' are private to their own module",
                              line=at.line, col=at.col)
         return mangle(module, name)

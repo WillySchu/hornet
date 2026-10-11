@@ -152,25 +152,23 @@ def test_nonexistent_import_path_is_rejected():
             discover_modules(entry)
 
 
-def test_two_different_files_with_same_basename_is_rejected():
-    """sub1/utils.ht and sub2/utils.ht are genuinely different files
-    that would both want the canonical name "utils" -- module names
-    must be globally unique, so this is a hard error regardless of
-    how either is imported."""
+def test_two_different_files_with_same_basename_are_two_modules():
+    """sub1/utils.ht and sub2/utils.ht are different files, so different modules: each is known by
+    its name with the directory that tells it from the other. (More in tests/test_module_identity.py.)"""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
-            "import 'sub1/utils'\nimport 'sub2/utils'\n\ndef int main():\n    return 0\n",
+            "import 'sub1/utils'\nimport 'sub2/utils' as other\n\ndef int main():\n    return 0\n",
         )
         _write(tmpdir, "sub1/utils.ht", "def int a():\n    return 1\n")
         _write(tmpdir, "sub2/utils.ht", "def int b():\n    return 2\n")
-        with pytest.raises(ModuleError, match="module names must be globally unique"):
-            discover_modules(entry)
+        entry_program, found = discover_modules(entry)
+        assert set(found) == {"sub1$utils", "sub2$utils"}
+        assert entry_program.import_aliases == {"utils": "sub1$utils", "other": "sub2$utils"}
 
 
-def test_same_basename_collision_detected_even_when_transitive():
-    """The collision doesn't have to be at the entry file's own import
-    list -- it's detected anywhere in the discovered set."""
+def test_same_basename_is_told_apart_even_when_transitive():
+    """The two needn't be imported by one file: wherever they are in the program, both are renamed."""
     with tempfile.TemporaryDirectory() as tmpdir:
         entry = _write(
             tmpdir, "main.ht",
@@ -179,8 +177,11 @@ def test_same_basename_collision_detected_even_when_transitive():
         _write(tmpdir, "a.ht", "import 'utils'\n\ndef int fromA():\n    return 1\n")
         _write(tmpdir, "utils.ht", "def int x():\n    return 1\n")
         _write(tmpdir, "sub/utils.ht", "def int y():\n    return 2\n")
-        with pytest.raises(ModuleError, match="module names must be globally unique"):
-            discover_modules(entry)
+        entry_program, found = discover_modules(entry)
+        top = Path(tmpdir).resolve().name
+        assert set(found) == {"a", "sub$utils", f"{modules._name_part(top)}$utils"}
+        assert found["a"].import_aliases == {"utils": f"{modules._name_part(top)}$utils"}
+        assert entry_program.import_aliases == {"a": "a", "utils": "sub$utils"}
 
 
 def test_duplicate_local_alias_in_one_file_is_rejected():
