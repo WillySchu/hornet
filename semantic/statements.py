@@ -7,8 +7,8 @@ The expressions in them are ExpressionChecker's; nothing there calls back here."
 from typing import Dict, List, Optional
 
 from parser import (
-    ArrayLiteral, Assign, Binary, Break, Call, Continue, Defer, DictLiteral, ExprStmt, Field, For, ForIn, Function, If,
-    Index, IsCheck, Match, Node, Return, Slice, SliceLiteral, StringLiteral, VarDecl, Variable, While,
+    Assign, Binary, Break, Continue, Defer, ExprStmt, Field, For, ForIn, Function, If, Index, IsCheck, Match, Node,
+    Return, VarDecl, Variable, While,
 )
 from scopes import display_name as shown
 from semantic.context import Context
@@ -445,29 +445,12 @@ class StatementChecker:
         self.context.scopes.pop()
 
     def analyze_for_in(self, stmt: ForIn, return_type: Type) -> None:
-        """`for a[, b] in iterable:` over arrays, slices, dicts, and strings (bytes); or `for a in Enum:`,
-        over an enum's members."""
+        """`for a[, b] in iterable:` over an array, slice, dict, or string (its bytes), which any
+        expression may give: it is evaluated once, before the first time round. Or `for a in Enum:`, over
+        an enum's members."""
         enum = self.expressions.enum_named_by(stmt.iterable)
         if enum is not None:
             return self._analyze_for_members(stmt, Type(TypeKind.ENUM, enum_name=enum), return_type)
-        if not isinstance(
-                stmt.iterable,
-                (Variable, Field, Index, Slice, ArrayLiteral, SliceLiteral, DictLiteral, StringLiteral, Call)):
-            raise SemanticError(
-                f"'for ... in' requires a variable, field, index, "
-                f"slice, or array/dict/str literal as its own iterable, "
-                f"not a {type(stmt.iterable).__name__}",
-                stmt.iterable,
-            )
-        if isinstance(stmt.iterable, Call) or (
-                isinstance(stmt.iterable, (Field, Index, Slice))
-                and self.expressions.root_variable_of(stmt.iterable) is None):
-            raise SemanticError(
-                f"'for ... in' does not support a function call result "
-                f"as its own iterable, or anywhere in its own "
-                f"iterable's chain -- assign it to a variable first",
-                stmt.iterable,
-            )
         iterable_type = self.expressions.check_expr(stmt.iterable)
         if iterable_type.kind == TypeKind.ENUM:
             raise SemanticError(

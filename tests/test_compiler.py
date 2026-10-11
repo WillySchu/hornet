@@ -18512,87 +18512,17 @@ class TestForInSemantics:
         )
         analyze(ast)  # should not raise
 
-    def test_bare_call_iterable_is_rejected(self):
-        ast = _parse(
-            "def []int make():\n"
-            "    []int s = [1, 2, 3]\n"
-            "    return s\n"
-            "\n"
-            "def int main():\n"
-            "    for x in make():\n"
-            "        print(x)\n"
-            "    return 0\n"
-        )
-        with pytest.raises(
-            SemanticError,
-            match="'for ... in' does not support a function call result",
-        ):
-            analyze(ast)
-
-    def test_append_call_as_iterable_is_rejected(self):
-        ast = _parse(
-            "def int main():\n"
-            "    []int s = [1, 2, 3]\n"
-            "    for x in append(s, 4):\n"
-            "        print(x)\n"
-            "    return 0\n"
-        )
-        with pytest.raises(
-            SemanticError,
-            match="'for ... in' does not support a function call result",
-        ):
-            analyze(ast)
-
-    def test_field_rooted_in_call_iterable_is_rejected(self):
-        ast = _parse(
-            "type Box struct:\n"
-            "    []int items\n"
-            "\n"
-            "def Box makeBox():\n"
-            "    return Box([1, 2, 3])\n"
-            "\n"
-            "def int main():\n"
-            "    for x in makeBox().items:\n"
-            "        print(x)\n"
-            "    return 0\n"
-        )
-        with pytest.raises(
-            SemanticError,
-            match="'for ... in' does not support a function call result",
-        ):
-            analyze(ast)
-
-    def test_index_rooted_in_call_iterable_is_rejected(self):
-        ast = _parse(
-            "def [2][]int makeRows():\n"
-            "    return [[1, 2], [3, 4]]\n"
-            "\n"
-            "def int main():\n"
-            "    for x in makeRows()[0]:\n"
-            "        print(x)\n"
-            "    return 0\n"
-        )
-        with pytest.raises(
-            SemanticError,
-            match="'for ... in' does not support a function call result",
-        ):
-            analyze(ast)
-
-    def test_slice_rooted_in_call_iterable_is_rejected(self):
-        ast = _parse(
-            "def []int makeSlice():\n"
-            "    return [1, 2, 3, 4, 5]\n"
-            "\n"
-            "def int main():\n"
-            "    for x in makeSlice()[1:3]:\n"
-            "        print(x)\n"
-            "    return 0\n"
-        )
-        with pytest.raises(
-            SemanticError,
-            match="'for ... in' does not support a function call result",
-        ):
-            analyze(ast)
+    def test_a_call_and_what_is_reached_through_one_can_be_iterated(self):
+        # (They once could not be. More in tests/test_for_in_expressions.py.)
+        for declarations, iterable in [
+            ("def []int make():\n    []int s = [1, 2, 3]\n    return s\n", "make()"),
+            ("def []int make():\n    return [1, 2, 3]\n", "append(make(), 4)"),
+            ("type Box struct:\n    []int items\n\ndef Box makeBox():\n    return Box([1, 2, 3])\n", "makeBox().items"),
+            ("def [2][]int makeRows():\n    return [[1, 2], [3, 4]]\n", "makeRows()[0]"),
+            ("def []int makeSlice():\n    return [1, 2, 3, 4, 5]\n", "makeSlice()[1:3]"),
+        ]:
+            analyze(_parse(
+                declarations + f"\ndef int main():\n    for x in {iterable}:\n        print(x)\n    return 0\n"))
 
     def test_array_literal_iterable_analyzes_correctly(self):
         ast = _parse(
@@ -18622,7 +18552,7 @@ class TestForInSemantics:
         )
         analyze(ast)  # should not raise
 
-    def test_non_addressable_iterable_is_rejected(self):
+    def test_an_iterable_that_is_no_collection_is_rejected(self):
         ast = _parse(
             "def int main():\n"
             "    int n = 3\n"
@@ -18632,8 +18562,7 @@ class TestForInSemantics:
         )
         with pytest.raises(
             SemanticError,
-            match="'for ... in' requires a variable, field, index, "
-                  "slice, or array/dict/str literal",
+            match="'for ... in' requires an array, slice, dict, or str as its own iterable .*, got int",
         ):
             analyze(ast)
 

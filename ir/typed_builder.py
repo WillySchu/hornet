@@ -881,19 +881,8 @@ class TypedFunctionBuilder:
                 length = cap = IRConst(e.base.type.size, Type.INT)
             else:
                 ir, ptr, length, cap = self.slice_value(e.base)
-            # A slice may extend up to the capacity, as in Go (an array's is its length).
-            bounds_ir, low, high = self.bounds(e, length, cap if e.kind == 'slice' else None)
-            width = self.width(e.type.element_type)
-            scaled = self.temp(Type.INT)
-            new_ptr = self.temp()
-            new_len = self.temp(Type.INT)
-            new_cap = self.temp(Type.INT)
-            return ir + bounds_ir + [
-                IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=low, right=IRConst(width, Type.INT)),
-                IRBinOp(dst=new_ptr, op=BinaryOp.ADD, left=ptr, right=scaled),
-                IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high, right=low),
-                IRBinOp(dst=new_cap, op=BinaryOp.SUBTRACT, left=cap, right=low),
-            ], new_ptr, new_len, new_cap
+            slice_ir, new_ptr, new_len, new_cap = self.slice_between(e, ptr, length, cap)
+            return ir + slice_ir, new_ptr, new_len, new_cap
         if isinstance(e, t.Append):
             return self.append(e)
         if isinstance(e, t.BytesFromStr):
@@ -909,6 +898,22 @@ class TypedFunctionBuilder:
         return ir + [IRLoad(dst=ptr, address=address)] + len_ir + [
             IRLoad(dst=length, address=len_address)
         ] + cap_ir + [IRLoad(dst=cap, address=cap_address)], ptr, length, cap
+
+    def slice_between(self, e: t.SliceOf, ptr, length, cap) -> tuple:
+        """(IR, ptr, len, cap) of `e`, the part between its bounds of the storage at `ptr`."""
+        # A slice may extend up to the capacity, as in Go (an array's is its length).
+        bounds_ir, low, high = self.bounds(e, length, cap if e.kind == 'slice' else None)
+        width = self.width(e.type.element_type)
+        scaled = self.temp(Type.INT)
+        new_ptr = self.temp()
+        new_len = self.temp(Type.INT)
+        new_cap = self.temp(Type.INT)
+        return bounds_ir + [
+            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=low, right=IRConst(width, Type.INT)),
+            IRBinOp(dst=new_ptr, op=BinaryOp.ADD, left=ptr, right=scaled),
+            IRBinOp(dst=new_len, op=BinaryOp.SUBTRACT, left=high, right=low),
+            IRBinOp(dst=new_cap, op=BinaryOp.SUBTRACT, left=cap, right=low),
+        ], new_ptr, new_len, new_cap
 
     # -- scalar values
 
@@ -1335,13 +1340,20 @@ class TypedFunctionBuilder:
             length, element_type = IRConst(s.iterable.type.size, Type.INT), s.iterable.type.element_type
         else:
             element_type = s.iterable.type.element_type
-            root = s.iterable.base if isinstance(s.iterable, t.SliceOf) and s.iterable.kind == 'slice' else s.iterable
-            ir, base, length, _ = self.slice_value(s.iterable)
+            between = s.iterable if isinstance(s.iterable, t.SliceOf) and s.iterable.kind == 'slice' else None
+            root = s.iterable if between is None else between.base
             if isinstance(root, _PLACE_NODES):
-                root_ir, descriptor = self.place_address(root)
-                first = self.temp()
-                ir += root_ir + [IRLoad(dst=first, address=descriptor)]
-                recheck = (descriptor, first)
+                # A slice that is somewhere: where is worked out once (it may take a call to say), to
+                # read the slice from now and to look at again each time round.
+                ir, descriptor = self.place_address(root)
+                read_ir, base, length, cap = self.read_slice(descriptor)
+                ir += read_ir
+                recheck = (descriptor, base)
+                if between is not None:
+                    between_ir, base, length, _ = self.slice_between(between, base, length, cap)
+                    ir += between_ir
+            else:
+                ir, base, length, _ = self.slice_value(s.iterable)
         i, more = self.temp(Type.INT), self.temp(Type.BOOL)
         ir += [IRMove(dst=i, src=IRConst(0, Type.INT)), IRJump(start), IRLabel(start),
                IRBinOp(dst=more, op=BinaryOp.LESS_THAN, left=i, right=length),

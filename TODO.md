@@ -42,8 +42,6 @@ Updates:
 - Slice equality?
 - Dict equality?
 - Import \*?
-- Borrow checker for modifying dicts / slices in for ... in ... loops?
-- `for in` loops on function calls.
 - Variadic functions.
 - Variadic FFI calls?
 - Make `append` variadic.
