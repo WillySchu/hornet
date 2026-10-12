@@ -343,6 +343,7 @@ class ExpressionChecker:
                     f"own field/element isn't yet supported",
                     expr,
                 )
+            self.refuse_address_into(expr.operand, "take the address of", expr)
             return Type(TypeKind.POINTER, element_type=operand_type)
         if expr.op == UnaryOp.DEREFERENCE:
             if operand_type.kind != TypeKind.POINTER:
@@ -679,6 +680,8 @@ class ExpressionChecker:
     def check_slice(self, expr: Slice) -> Type:
         """`array[low:high]` over an array, slice, or str."""
         base_type = self.check_expr(expr.array)
+        if base_type.kind == TypeKind.ARRAY:  # (a view of the array where it is)
+            self.refuse_address_into(expr.array, "slice an array in", expr)
         if base_type.kind not in (TypeKind.ARRAY, TypeKind.SLICE, TypeKind.STR):
             raise SemanticError(
                 f"Cannot slice a value of type {base_type} -- only "
@@ -1062,6 +1065,30 @@ class ExpressionChecker:
                 if missing is not None:
                     return missing
         return None
+
+    def refuse_address_into(self, place: Node, doing: str, at: Node) -> None:
+        """Refuse an address into `place` (`doing` says how it would be taken) if it is part of a dict
+        entry, which moves when the dict grows, or of a narrowed sum's payload, which another variant
+        takes the place of when the sum is given one. Parts are fields and array elements, not what a
+        pointer points to. (`place` is checked.)"""
+        while True:
+            if isinstance(place, Field) and self.facts.types[place.base.nid].kind != TypeKind.POINTER:
+                place = place.base
+            elif isinstance(place, Index) and self.facts.types[place.array.nid].kind == TypeKind.ARRAY:
+                place = place.array
+            else:
+                break
+        if isinstance(place, Index) and self.facts.types[place.array.nid].kind == TypeKind.DICT:
+            raise SemanticError(
+                f"Cannot {doing} a dict entry, or anything in one: the dict moves its entries when it grows. "
+                f"Copy the value out and store it back, or keep pointers in the dict", at)
+        decl = self.facts.decls.get(place.nid) if isinstance(place, Variable) else None
+        if decl is not None and self.symbols[decl].type.kind == TypeKind.SUM \
+                and self.facts.types[place.nid] != self.symbols[decl].type:
+            raise SemanticError(
+                f"Cannot {doing} the payload of narrowed '{place.name}', or anything in it: giving '{place.name}' "
+                f"another variant puts that in its place. Copy it out (`{self.facts.types[place.nid]} copy = "
+                f"{place.name}`), change the copy, and assign it back", at)
 
     def root_variable_of(self, expr: Node) -> Optional[Variable]:
         """Variable under a Field/Index/Slice chain, if any."""

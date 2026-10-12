@@ -37,6 +37,8 @@ class Checker(Protocol):
 
     def hidden(self, struct: str, name: str) -> bool: ...
 
+    def refuse_address_into(self, place: Node, doing: str, at: Node) -> None: ...
+
     def enum_named_by(self, expr: Node) -> Optional[str]: ...
 
     def as_folded_int_literal(self, expr: Node) -> Optional[int]: ...
@@ -184,6 +186,8 @@ class CallChecker:
                     f"needs an addressable receiver (a variable, field, index, or dereference), not a temporary",
                     expr.receiver,
                 )
+            self.checker.refuse_address_into(
+                expr.receiver, f"call method '{expr.name}' (its receiver is a pointer) on", expr)
             if isinstance(receiver, Unary):
                 receiver = receiver.operand  # &(*p) is p
             else:

@@ -16,8 +16,6 @@ Binary Ops:
 Updates:
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
 - Stdlib for the port. Integer parsing and path helpers.
-- Pointers into a sum's payload.
-- &d[k] after a rehash.
 - Nothing warns when a result is ignored, such as a bare write\_stdout(...) statement.
 - Weight spills by use count and loop depth.
 - `in` checking for strings.

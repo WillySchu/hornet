@@ -6387,8 +6387,9 @@ class TestArraySliceAndPointerVariants:
             expected=3,
         )
 
-    def test_address_of_a_narrowed_scalar_binding(self):
-        assert_program_exit_code(
+    def test_address_of_a_narrowed_scalar_binding_is_refused(self):
+        # A binding is a sum variable like any other: its payload has no address (test_unaddressable.py).
+        assert_program_semantic_error(
             "type Mixed is int | str\n"
             "\n"
             "def int main():\n"
@@ -6397,11 +6398,11 @@ class TestArraySliceAndPointerVariants:
             "        int p = *&n\n"
             "        return p\n"
             "    return -1\n",
-            expected=42,
+            match="Cannot take the address of the payload of narrowed 'n'",
         )
 
-    def test_address_of_a_narrowed_array_binding(self):
-        assert_program_exit_code(
+    def test_address_of_a_narrowed_array_binding_is_refused(self):
+        assert_program_semantic_error(
             "type Thing is [3]int | str\n"
             "\n"
             "def int main():\n"
@@ -6410,7 +6411,7 @@ class TestArraySliceAndPointerVariants:
             "        *[3]int p = &arr\n"
             "        return (*p)[1]\n"
             "    return -1\n",
-            expected=20,
+            match="Cannot take the address of the payload of narrowed 'arr'",
         )
 
 

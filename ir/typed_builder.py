@@ -90,6 +90,13 @@ def _calls_anything(e) -> bool:
     return any(isinstance(node, t.Call) for node in _nodes(e))
 
 
+def _within(place):
+    """What `place` is part of, through fields and array elements (not pointers); itself if nothing."""
+    while (isinstance(place, t.FieldAccess) and not place.through_pointer) or isinstance(place, t.ArrayIndex):
+        place = place.base
+    return place
+
+
 def _addressed(fn: t.Function) -> set:
     """Ids of the variables whose own address is taken (`&x`; not `&x.field`, nor `&u` of a narrowed
     `u`): the only way a whole variable changes without being assigned. So a scalar one is copied
@@ -324,6 +331,8 @@ class TypedFunctionBuilder:
         if isinstance(s, t.CompoundAssign):
             if isinstance(s.target, t.DictLookup) and _calls_anything(s.value):
                 return self.compound_assign_dict_entry(s)
+            if isinstance(_within(s.target), t.DictLookup) and _calls_anything(s.value):
+                return self.compound_assign_in_dict_entry(s)
             if isinstance(s.target, t.Local):  # read and written in place: `x = x op v`
                 kind = t.StrConcat if s.target.type == Type.STR else lambda type_, l, r: t.Binary(
                     type_, s.op, l, r, line=s.line, col=s.col, file=s.file)
@@ -1347,7 +1356,9 @@ class TypedFunctionBuilder:
             ir, base, length = self.str_value(s.iterable)
             element_type = Type.UINT8
         elif s.kind == 'array':
-            ir, base = self.address(s.iterable)
+            # Iterated where it is, unless that may move (a dict entry) or become another variant's (a
+            # narrowed payload) during the loop: then a copy.
+            ir, base = self.address(s.iterable, fresh=isinstance(_within(s.iterable), (t.DictLookup, t.Payload)))
             length, element_type = IRConst(s.iterable.type.size, Type.INT), s.iterable.type.element_type
         else:
             element_type = s.iterable.type.element_type
@@ -1774,6 +1785,59 @@ class TypedFunctionBuilder:
             IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
             IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])
         ], buffer, total
+
+    def compound_assign_in_dict_entry(self, s: t.CompoundAssign) -> list:
+        """`d[k].f op= v`, or an element, at any depth, where evaluating `v` may change `d`: as
+        compound_assign_dict_entry, the entry found again by key for the write, at the same offset."""
+        entry_place = _within(s.target)
+        ir, entry = self.dict_entry(entry_place.dict, entry_place.key)
+
+        def found() -> tuple:
+            lookup_ir, base = self.dict_op(entry, 'lookup', Type.INT64)
+            return lookup_ir + self.panic_when_missing(
+                base, "dict lookup: key not found", entry_place.dict, entry_place), base
+
+        first_ir, base = found()
+        offset_ir, offset = self.offset_within(s.target, entry_place)
+        address, again = self.temp(), self.temp()
+        ir += first_ir + offset_ir + [IRBinOp(dst=address, op=BinaryOp.ADD, left=base, right=offset)]
+        if s.target.type == Type.STR:
+            read_ir, left_ptr, left_len = self.read_str(address)
+            value_ir, right_ptr, right_len = self.str_value(s.value)
+            concat_ir, ptr, length = self.concat(left_ptr, left_len, right_ptr, right_len)
+            later_ir, base = found()
+            len_ir, len_address = self.offset(again, 8)
+            return ir + read_ir + value_ir + concat_ir + later_ir + [
+                IRBinOp(dst=again, op=BinaryOp.ADD, left=base, right=offset)] + len_ir + [
+                IRStore(address=again, value=ptr, value_type=Type.INT64),
+                IRStore(address=len_address, value=length, value_type=Type.INT)]
+        if not _scalar(s.target.type):
+            raise NotYetPorted(f"compound assignment of {s.target.type}")
+        current, result = self.temp(s.target.type), self.temp(s.target.type)
+        value_ir, value = self.value(s.value)
+        later_ir, base = found()
+        return ir + [IRLoad(dst=current, address=address)] + value_ir + [
+            IRBinOp(dst=result, op=s.op, left=current, right=value, where=s.where)] + later_ir + [
+            IRBinOp(dst=again, op=BinaryOp.ADD, left=base, right=offset),
+            IRStore(address=again, value=result, value_type=s.target.type)]
+
+    def offset_within(self, place, whole) -> tuple:
+        """(IR, offset) of `place` from the start of `whole`, which it is part of (see _within); an
+        element's index is evaluated and bounds-checked."""
+        if place is whole:
+            return [], IRConst(0, Type.INT)
+        ir, offset = self.offset_within(place.base, whole)
+        added = self.temp(Type.INT)
+        if isinstance(place, t.FieldAccess):
+            return ir + [IRBinOp(dst=added, op=BinaryOp.ADD, left=offset, right=IRConst(self.field_offset(place),
+                                                                                      Type.INT))], added
+        index_ir, index = self.value(place.index)
+        scaled = self.temp(Type.INT)
+        return ir + index_ir + [
+            IRBoundsCheck(index=index, length=IRConst(place.base.type.size, Type.INT), where=place.where),
+            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=index, right=IRConst(self.width(place.type), Type.INT)),
+            IRBinOp(dst=added, op=BinaryOp.ADD, left=offset, right=scaled),
+        ], added
 
     def compound_assign_dict_entry(self, s: t.CompoundAssign) -> list:
         """`d[k] op= v` where evaluating `v` may change `d`: `d` and `k` once, read the entry, evaluate

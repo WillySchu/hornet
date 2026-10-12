@@ -113,9 +113,7 @@ def test_an_aliased_variable_that_keeps_its_variant_runs_normally():
 
 @pytest.mark.parametrize("body,checked", [
     ("def int f(U u):\n    if u is A:\n        return len(u.s)\n    return u.n\n", False),
-    # A pointer into the payload, or to the narrowed variable, can't change the variant.
-    ("def int f(U u):\n    if u is A:\n        *str q = &u.s\n        *A a = &u\n        return len(*q) + len(a.s)\n"
-     "    return u.n\n", False),
+    # (A pointer into the payload, which could change the variant, is refused: test_unaddressable.py.)
     ("def int f(U u):\n    *U p = &u\n    if u is A:\n        return len(u.s)\n    return u.n\n", True),
 ])
 def test_only_variables_with_their_address_taken_are_checked(body, checked):
