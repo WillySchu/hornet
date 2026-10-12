@@ -13,14 +13,14 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 from diagnostics import path_text
 from parser import (
     READ_AS_A_TYPED_LITERAL, ArrayLiteral, ArrayTypeExpr, EnumDef, ExternFunctionDecl, Function, IntrinsicDecl,
-    MethodDef, Node, Param, PointerTypeExpr, Program, QualifiedTypeExpr, SliceTypeExpr, StructDef, SumTypeDef,
+    MethodDef, Node, Param, PointerTypeExpr, Program, QualifiedTypeExpr, StructDef, SumTypeDef,
     TypeAlias,
 )
 from scopes import BUILTIN_FUNCTION_NAMES, display_name as shown
 from semantic.constants import ConstEvaluator
 from semantic.errors import SemanticError
 from semantic.facts import Facts
-from semantic.type_resolution import TYPE_NAMES, TypeResolver, type_from_name
+from semantic.type_resolution import TypeResolver, type_from_name
 from typesys import EnumInfo, StructInfo, SumTypeInfo, Type, TypeKind
 
 
@@ -97,11 +97,12 @@ class DeclarationResolver:
         # 1. Reserve struct names so aliases can target them.
         struct_registry = self._reserve_struct_names(program.structs)
 
-        # 2. Resolve aliases before struct fields, which may use them.
-        decls.type_aliases = self._collect_type_aliases(program.type_aliases, struct_registry)
-
-        # 3. Resolve struct fields; sum-type names are reserved first so fields can name them.
+        # 2. Resolve aliases before struct fields, which may use them. Sum-type names are reserved first
+        # so that aliases and fields can name them.
         reserved_sums = {std.name: None for std in program.sum_types}
+        decls.type_aliases = self._collect_type_aliases(program.type_aliases, struct_registry, reserved_sums)
+
+        # 3. Resolve struct fields.
         decls.structs = self._resolve_struct_fields(program.structs, struct_registry, reserved_sums)
 
         # 3.5. Sum types need resolved structs. Then no type may contain itself by value.
@@ -253,8 +254,10 @@ class DeclarationResolver:
             registry[sd.name] = None
         return registry
 
-    def _collect_type_aliases(self, alias_defs: List[TypeAlias], structs: Dict[str, StructInfo]) -> Dict[str, Type]:
-        """Resolve every alias fully, detecting cycles."""
+    def _collect_type_aliases(self, alias_defs: List[TypeAlias], structs: Dict[str, StructInfo],
+                              sums: Dict[str, None]) -> Dict[str, Type]:
+        """Resolve every alias fully, detecting cycles. `structs` and `sums` have the names of those
+        declared, not yet what they hold."""
         # Pass 1: reserve names, rejecting duplicates and collisions.
         seen: Dict[str, TypeAlias] = {}
         for ad in alias_defs:
@@ -293,31 +296,23 @@ class DeclarationResolver:
             resolved[name] = result
             return result
 
+        class Aliases:
+            """The aliases, each resolved when a type names it."""
+            def __contains__(self, name) -> bool:
+                return name in seen
+
+            def __getitem__(self, name) -> Type:
+                return resolve(name)
+
         def resolve_target(target, alias_node: TypeAlias) -> Type:
-            """`alias_node` is for error positions."""
-            if isinstance(target, ArrayTypeExpr):
-                size = target.size if isinstance(target.size, int) else self.facts.array_sizes[target.nid]
-                return Type(TypeKind.ARRAY, element_type=resolve_target(target.element_type, alias_node), size=size)
-            if isinstance(target, SliceTypeExpr):
-                return Type(TypeKind.SLICE, element_type=resolve_target(target.element_type, alias_node))
-            if isinstance(target, str) and target in TYPE_NAMES:
-                return TYPE_NAMES[target]
+            """`target` in the file of `alias_node` (also where an error is), as any type is written there."""
             saved_scope = self.scope
             self._enter(alias_node)
-            target = self._resolve_type_name(target)
-            self.scope = saved_scope
-            if target in seen:
-                return resolve(target)
-            if target in structs:
-                return Type(TypeKind.STRUCT, struct_name=target)
-            if target in self.decls.enums:
-                return Type(TypeKind.ENUM, enum_name=target)
-            raise SemanticError(
-                f"Unknown type '{target}' in a type alias's own target "
-                f"-- expected int, bool, str, a struct or enum name, or "
-                f"another type alias",
-                alias_node,
-            )
+            try:
+                return type_from_name(target, structs, Aliases(), alias_node, sums, resolve=self._resolve_type_name,
+                                      enums=self.decls.enums, array_sizes=self.facts.array_sizes)
+            finally:
+                self.scope = saved_scope
 
         for ad in alias_defs:
             resolve(ad.name)

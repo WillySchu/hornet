@@ -4180,7 +4180,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="expected int, bool, str, a struct or enum name, or another type alias",
+            match="Unknown type 'NotAThing'",
         )
 
     def test_unknown_array_element_target_is_rejected(self):
@@ -4189,7 +4189,7 @@ class TestTypeAliases:
             "\n"
             "def int main():\n"
             "    return 0\n",
-            match="expected int, bool, str, a struct or enum name, or another type alias",
+            match="Unknown type 'NotAThing'",
         )
 
     def test_array_alias_as_param_and_return_type(self):
@@ -4360,6 +4360,39 @@ class TestTypeAliases:
             "def int main():\n"
             "    return 0\n",
             match="builtin",
+        )
+
+    def test_alias_of_a_pointer_a_dict_and_a_sum(self):
+        assert_program_stdout(
+            "type A struct:\n"
+            "    int a\n"
+            "    Ref next\n"
+            "type Ref = *A\n"
+            "type Counts = dict[str]int\n"
+            "type Shape is A | str\n"
+            "type Sh = Shape\n"
+            "def int total(Counts c):\n"
+            "    int n = 0\n"
+            "    for k, v in c:\n"
+            "        n += v\n"
+            "    return n\n"
+            "def int main():\n"
+            "    A x = A(1, none)\n"
+            "    A y = A(2, &x)\n"
+            "    Ref r = &y\n"
+            "    print(r.next.a)\n"
+            "    Counts c\n"
+            "    c['a'] = 2\n"
+            "    c['b'] = 3\n"
+            "    print(total(c))\n"
+            "    Sh s = 'text'\n"
+            "    match s as v:\n"
+            "        is A:\n"
+            "            print(v.a)\n"
+            "        is str:\n"
+            "            print(v)\n"
+            "    return 0\n",
+            "1\n5\ntext\n",
         )
 
 

@@ -95,3 +95,31 @@ def test_an_array_size_is_asked_of_the_checker_with_the_scope_it_is_written_in()
 def test_what_is_wrong_with_a_declaration_is_found_here(source, message):
     with pytest.raises(SemanticError, match=message):
         _resolve(source + "def int main():\n    return 0\n")
+
+
+def test_an_alias_names_any_type():
+    decls, _, _ = _resolve(
+        "type A struct:\n    Ref next\n"
+        "type Ref = *A\n"                     # a pointer, to a struct that names the alias itself
+        "type Counts = dict[str]Refs\n"       # a dict, of an alias declared after it
+        "type Refs = [2]Ref\n"
+        "type Shape is A | str\n"
+        "type Sh = Shape\n"                   # a sum, resolved after aliases
+        "def int main():\n    return 0\n")
+    ref = Type(TypeKind.POINTER, element_type=Type(TypeKind.STRUCT, struct_name='A'))
+    refs = Type(TypeKind.ARRAY, element_type=ref, size=2)
+    assert decls.type_aliases == {
+        'Ref': ref, 'Refs': refs, 'Counts': Type(TypeKind.DICT, key_type=Type.STR, element_type=refs),
+        'Sh': Type(TypeKind.SUM, sum_type_name='Shape')}
+    assert decls.structs['A'].fields == {'next': ref}
+
+
+@pytest.mark.parametrize("alias,message", [
+    ("type B = *B\n", "Type alias 'B' is defined in terms of itself"),
+    ("type B = **A\n", "Pointer-to-pointer types aren't supported yet"),
+    ("type B = dict[R]int\ntype R = *A\n", "'\\*A' can't be a dict's own key type"),
+    ("type B = []Missing\n", "Unknown type 'Missing'"),
+])
+def test_what_an_alias_cannot_name(alias, message):
+    with pytest.raises(SemanticError, match=message):
+        _resolve("type A struct:\n    int a\n" + alias + "def int main():\n    return 0\n")
