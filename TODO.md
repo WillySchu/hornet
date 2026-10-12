@@ -15,7 +15,6 @@ Binary Ops:
 
 Updates:
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
-- No mutable globals. Worth recording, since the port will need context structs because of it.
 - Stdlib for the port. Integer parsing and path helpers.
 - Pointers into a sum's payload.
 - &d[k] after a rehash.
@@ -41,10 +40,7 @@ Updates:
 - Add format string literal.
 - Slice equality?
 - Dict equality?
-- Import \*?
 - Variadic FFI calls?
-- As binding in a while condition?
-- Enums. Explicit member values, ordering?
 - float
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.
