@@ -111,7 +111,8 @@ def _tree_value(value, depth: int, lines: list) -> None:
     """A node, a list of values, or a tuple (an entry: a name and its value, a check and its body)."""
     indent = "  " * depth
     if isinstance(value, syntax.Node) and not isinstance(value, _TYPE_EXPRS):
-        shown = [(f.name, getattr(value, f.name)) for f in fields(value) if f.name not in _HIDDEN]
+        shown = [(f.name, getattr(value, f.name)) for f in fields(value) if f.name not in _HIDDEN
+                 and not (f.metadata.get('shown_if_set') and not getattr(value, f.name))]
         attrs = ''.join(f" {name}={_tree_scalar(name, v)}" for name, v in shown if _is_scalar(v) and v is not None)
         lines.append(indent + type(value).__name__ + attrs)
         for name, v in shown:

@@ -9,12 +9,11 @@ from ops import UnaryOp, BinaryOp
 # What this module offers: the node classes, in the order they are defined, and stamp_file.
 __all__ = [
     'Node', 'Constant', 'BoolLiteral', 'NoneLiteral', 'StringLiteral', 'ByteLiteral', 'Variable', 'ArrayLiteral',
-    'DictLiteral', 'Index', 'SliceLiteral', 'Slice', 'Call', 'Unary', 'Cast', 'Binary', 'Return', 'ArrayTypeExpr',
-    'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr', 'QualifiedTypeExpr', 'VarDecl', 'Assign', 'Field',
-    'StructField', 'MethodDef', 'StructDef', 'ExprStmt', 'IsCheck', 'If', 'Match', 'While', 'For', 'ForIn', 'Defer',
-    'Break', 'Continue', 'Param', 'Function', 'ExternFunctionDecl', 'IntrinsicDecl', 'ConstDecl', 'EnumMember',
-    'EnumDef',
-    'TypeAlias', 'SumTypeDef', 'ImportDecl', 'FromImportDecl', 'Program', 'stamp_file',
+    'DictLiteral', 'Index', 'SliceLiteral', 'Slice', 'Call', 'Spread', 'Unary', 'Cast', 'Binary', 'Return',
+    'ArrayTypeExpr', 'SliceTypeExpr', 'PointerTypeExpr', 'DictTypeExpr', 'QualifiedTypeExpr', 'VarDecl', 'Assign',
+    'Field', 'StructField', 'MethodDef', 'StructDef', 'ExprStmt', 'IsCheck', 'If', 'Match', 'While', 'For', 'ForIn',
+    'Defer', 'Break', 'Continue', 'Param', 'Function', 'ExternFunctionDecl', 'IntrinsicDecl', 'ConstDecl', 'EnumMember',
+    'EnumDef', 'TypeAlias', 'SumTypeDef', 'ImportDecl', 'FromImportDecl', 'Program', 'stamp_file',
 ]
 
 _PRETTY_MAX_WIDTH = 88
@@ -54,7 +53,8 @@ def _pretty_list(items: list, indent: int) -> str:
 def _pretty_node(node: 'Node', indent: int) -> str:
     """Render `ClassName(field=value, ...)` via dataclasses.fields."""
     class_name = type(node).__name__
-    field_names = [f.name for f in fields(node) if f.name not in _HIDDEN_FIELDS]
+    field_names = [f.name for f in fields(node) if f.name not in _HIDDEN_FIELDS
+                   and not (f.metadata.get('shown_if_set') and not getattr(node, f.name))]
     if not field_names:
         return f"{class_name}()"
 
@@ -183,6 +183,12 @@ class Call(Node):
     args: List[Node] = field(default_factory=list)
     kwargs: Optional[List[Tuple[str, Node]]] = None
     receiver: Optional[Node] = None
+
+
+@dataclass
+class Spread(Node):
+    """`xs...`, a call's last argument: slice `value` passed as the variadic parameter's arguments."""
+    value: Node
 
 
 @dataclass
@@ -377,9 +383,10 @@ class Continue(Node):
 
 @dataclass
 class Param(Node):
-    """Parameter `T name`."""
+    """Parameter `T name`; a variadic one, `T... name`, has type `[]T`."""
     name: str
     type: Union[str, ArrayTypeExpr, SliceTypeExpr]
+    variadic: bool = field(default=False, metadata={'shown_if_set': True})
 
 
 @dataclass

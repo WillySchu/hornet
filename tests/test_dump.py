@@ -195,6 +195,8 @@ EXTRA = (
     "type Count = int\n"
     "def other.Thing same(other.Thing t, Count c):\n"
     "    return t\n"
+    "def int total(int... xs):\n"
+    "    return total(xs...)\n"
 )
 
 

@@ -8,8 +8,9 @@ from lexer import Token, TokenType
 from parser import expressions, statements, type_exprs
 from parser.nodes import (
     ConstDecl, EnumDef, EnumMember, ExternFunctionDecl, FromImportDecl, Function, ImportDecl, IntrinsicDecl,
-    MethodDef, Param, Program, StructDef, StructField, SumTypeDef, TypeAlias, stamp_file,
+    MethodDef, Param, Program, SliceTypeExpr, StructDef, StructField, SumTypeDef, TypeAlias, stamp_file,
 )
+from parser.errors import ParseError
 from parser.stream import TokenStream
 
 
@@ -84,7 +85,7 @@ def parse_intrinsic(p: TokenStream) -> IntrinsicDecl:
         return_type = type_exprs.parse_type(p)
     name_tok = p.expect(TokenType.IDENTIFIER, "Expected a function name")
     p.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
-    params = parse_params(p)
+    params = _not_variadic(parse_params(p), 'An intrinsic')
     p.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
     return IntrinsicDecl(
         name=name_tok.val, original_name=name_tok.val, return_type=return_type, params=params,
@@ -238,7 +239,7 @@ def parse_extern_function(p: TokenStream) -> ExternFunctionDecl:
     return_type = type_exprs.parse_return_type(p)
     name_tok = p.expect(TokenType.IDENTIFIER, "Expected a function name")
     p.expect(TokenType.OPEN_PAREN, "Expected '(' after function name")
-    params = parse_params(p)
+    params = _not_variadic(parse_params(p), 'An extern function')
     p.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
     return ExternFunctionDecl(
         name=name_tok.val, return_type=return_type, params=params,
@@ -256,7 +257,7 @@ def parse_method_def(p: TokenStream) -> MethodDef:
     receiver_tok = p.expect(TokenType.IDENTIFIER, "Expected a receiver name as a method's first parameter")
     params: List[Param] = []
     while p.match(TokenType.COMMA) and not p.check(TokenType.CLOSE_PAREN):  # trailing comma
-        params.append(parse_param(p))
+        params.append(_param_after(p, params))
     p.expect(TokenType.CLOSE_PAREN, "Expected ')' after parameter list")
     p.expect(TokenType.COLON, "Expected ':' to start the method body")
     p.expect(TokenType.NEWLINE, "Expected a newline after ':'")
@@ -275,7 +276,23 @@ def parse_params(p: TokenStream) -> List[Param]:
         return params
     params.append(parse_param(p))
     while p.match(TokenType.COMMA) and not p.check(TokenType.CLOSE_PAREN):
-        params.append(parse_param(p))
+        params.append(_param_after(p, params))
+    return params
+
+
+def _param_after(p: TokenStream, params: List[Param]) -> Param:
+    """The parameter following `params` (a method's may be none yet), which can't end with a variadic one."""
+    if params and params[-1].variadic:
+        raise p.error(f"A variadic parameter comes last -- another follows '{params[-1].name}'", p.current())
+    return parse_param(p)
+
+
+def _not_variadic(params: List[Param], what: str) -> List[Param]:
+    """`params`, refusing a variadic one: only Hornet's own functions and methods take them."""
+    for param in params:
+        if param.variadic:
+            raise ParseError(f"{what} can't have a variadic parameter ('{param.name}')", param.file,
+                             param.line, param.col)
     return params
 
 
@@ -291,7 +308,15 @@ def parse_const(p: TokenStream) -> ConstDecl:
 
 
 def parse_param(p: TokenStream) -> Param:
+    """`T name`, or `T... name`: variadic, a `[]T` its callers give elements of one by one."""
     start_tok = p.current()
+    if p.check(TokenType.ELLIPSIS):
+        raise p.error("A variadic parameter is written with '...' after its element type, as in `int... xs`",
+                      start_tok)
     param_type = type_exprs.parse_type(p)
+    variadic = p.match(TokenType.ELLIPSIS)
     name_tok = p.expect(TokenType.IDENTIFIER, "Expected a parameter name")
-    return Param(name=name_tok.val, type=param_type, line=start_tok.line, col=start_tok.col)
+    if variadic:
+        param_type = SliceTypeExpr(element_type=param_type, line=start_tok.line, col=start_tok.col)
+    return Param(name=name_tok.val, type=param_type, variadic=variadic, line=start_tok.line, col=start_tok.col,
+                 file=start_tok.file)

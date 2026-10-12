@@ -71,7 +71,7 @@ def bool is_ident_char(byte c):
 
 # Longest operator starting at i, or ''.
 def str _operator_at(str src, int i):
-    []str three = []str['<<=', '>>=']
+    []str three = []str['<<=', '>>=', '...']
     []str two = []str['==', '!=', '>=', '<=', '<<', '>>', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=']
     str one = '()[]{}><:;,=+-*/%~&|^.'
     int n = len(src)

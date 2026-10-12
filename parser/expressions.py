@@ -14,7 +14,8 @@ from parser import type_exprs
 from parser.errors import ParseError
 from parser.nodes import (
     ArrayLiteral, ArrayTypeExpr, Binary, BoolLiteral, ByteLiteral, Call, Cast, Constant, DictLiteral, DictTypeExpr,
-    Field, Index, IsCheck, Node, NoneLiteral, Slice, SliceLiteral, SliceTypeExpr, StringLiteral, Unary, Variable,
+    Field, Index, IsCheck, Node, NoneLiteral, Slice, SliceLiteral, SliceTypeExpr, Spread, StringLiteral, Unary,
+    Variable,
 )
 from parser.stream import TokenStream
 
@@ -176,7 +177,7 @@ def parse_postfix(p: TokenStream) -> Node:
         if p.match(TokenType.DOT):
             name_tok = p.expect(TokenType.IDENTIFIER, "Expected a field name after '.'")
             if p.match(TokenType.OPEN_PAREN):
-                args, kwargs = parse_receiver_call_args(p)
+                args, kwargs = parse_call_args(p)
                 p.expect(TokenType.CLOSE_PAREN, "Expected ')' after call arguments")
                 expr = Call(
                     name=name_tok.val, args=args, kwargs=kwargs, receiver=expr, line=expr.line, col=expr.col)
@@ -188,8 +189,9 @@ def parse_postfix(p: TokenStream) -> Node:
     return expr
 
 
-def parse_receiver_call_args(p: TokenStream) -> Tuple[List[Node], Optional[List[Tuple[str, Node]]]]:
-    """Positional or named args after `.name(`."""
+def parse_call_args(p: TokenStream) -> Tuple[List[Node], Optional[List[Tuple[str, Node]]]]:
+    """Positional or named arguments after a call's `(`, up to, not including, its `)`; no mixing. The last
+    positional one may be a spread, `xs...`."""
     args: List[Node] = []
     kwargs: Optional[List[Tuple[str, Node]]] = None
     if p.check(TokenType.CLOSE_PAREN):
@@ -200,6 +202,8 @@ def parse_receiver_call_args(p: TokenStream) -> Tuple[List[Node], Optional[List[
             field_name = p.advance().val
             p.advance()
             value = parse_expression(p)
+            if p.check(TokenType.ELLIPSIS):
+                raise p.error(f"A named argument can't be spread -- '{field_name}=...' ends in '...'", p.current())
             if args:
                 raise p.error(
                     f"Cannot mix positional and named arguments in a call -- "
@@ -211,6 +215,12 @@ def parse_receiver_call_args(p: TokenStream) -> Tuple[List[Node], Optional[List[
             kwargs.append((field_name, value))
         else:
             value = parse_expression(p)
+            if p.check(TokenType.ELLIPSIS):
+                dots = p.advance()
+                value = Spread(value=value, line=value.line, col=value.col)
+                after = p.peek(1) if p.check(TokenType.COMMA) else p.current()
+                if after.type != TokenType.CLOSE_PAREN:
+                    raise p.error("A spread argument (`xs...`) comes last in a call", dots)
             if kwargs is not None:
                 raise p.error(
                     f"Cannot mix positional and named arguments in a call -- a positional "
@@ -407,38 +417,10 @@ def _parse_dict_entry(p: TokenStream) -> Tuple[Node, Node]:
 
 
 def parse_call(p: TokenStream) -> Call:
-    """`name(args)` or `name(f=v, ...)`; no mixing."""
+    """`name(args)` or `name(f=v, ...)`."""
     name_tok = p.expect(TokenType.IDENTIFIER)
     p.expect(TokenType.OPEN_PAREN, "Expected '(' to start a call's argument list")
-    args: List[Node] = []
-    kwargs: Optional[List[Tuple[str, Node]]] = None
-    if not p.check(TokenType.CLOSE_PAREN):
-        while True:
-            start_tok = p.current()
-            if p.check(TokenType.IDENTIFIER) and p.peek(1).type == TokenType.ASSIGN:
-                field_name = p.advance().val
-                p.advance()
-                value = parse_expression(p)
-                if args:
-                    raise p.error(
-                        f"Cannot mix positional and named arguments in a call -- "
-                        f"'{field_name}=...' follows a positional argument",
-                        start_tok,
-                    )
-                if kwargs is None:
-                    kwargs = []
-                kwargs.append((field_name, value))
-            else:
-                value = parse_expression(p)
-                if kwargs is not None:
-                    raise p.error(
-                        f"Cannot mix positional and named arguments in a call -- a positional "
-                        f"argument follows a named one",
-                        start_tok,
-                    )
-                args.append(value)
-            if not p.match(TokenType.COMMA) or p.check(TokenType.CLOSE_PAREN):  # trailing comma
-                break
+    args, kwargs = parse_call_args(p)
     p.expect(TokenType.CLOSE_PAREN, "Expected ')' to close a call's argument list")
     return Call(name=name_tok.val, args=args, kwargs=kwargs, line=name_tok.line, col=name_tok.col)
 

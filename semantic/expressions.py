@@ -15,8 +15,8 @@ from diagnostics import quoted_text
 from ops import EQUALITY_OPS, LOGICAL_OPS, ORDERING_OPS, BinaryOp, UnaryOp
 from parser import (
     READ_AS_A_TYPED_LITERAL, ArrayLiteral, Binary, BoolLiteral, ByteLiteral, Call, Cast, ConstDecl, Constant,
-    DictLiteral, Field, Index, IsCheck, Node, NoneLiteral, QualifiedTypeExpr, Slice, SliceLiteral, StringLiteral,
-    Unary, VarDecl, Variable,
+    DictLiteral, Field, Index, IsCheck, Node, NoneLiteral, QualifiedTypeExpr, Slice, SliceLiteral, Spread,
+    StringLiteral, Unary, VarDecl, Variable,
 )
 from scopes import display_name as shown
 from semantic.calls import CallChecker
@@ -208,6 +208,8 @@ class ExpressionChecker:
             result = self.check_binary(expr)
         elif isinstance(expr, IsCheck):
             result = self.check_is_check(expr)
+        elif isinstance(expr, Spread):  # (a variadic call's own is checked by CallChecker)
+            raise SemanticError("A slice spread with '...' can only be given to a variadic parameter", expr)
         else:
             raise SemanticError(f"No semantic rule for expression: {expr!r}", expr)
         self.facts.types[expr.nid] = result

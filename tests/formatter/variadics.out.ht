@@ -1,0 +1,13 @@
+def bool check(Kind at, Kind... kinds):
+    return at in kinds
+
+def int total(int... xs):
+    return len(xs)
+
+def int main():
+    []Kind wanted = [Kind.Int]
+    check(at, Kind.Int, Kind.Str)
+    check(at, wanted...)
+    check(at, wanted[1:]...)
+    p.check(*q...)
+    return total()

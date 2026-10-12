@@ -10,7 +10,7 @@ back into the rest of it (Checker, below) for them. It keeps no state of its own
 from typing import Callable, Optional, Protocol
 
 from ops import UnaryOp
-from parser import Call, Field, Index, Node, Unary, Variable
+from parser import ArrayLiteral, Call, Field, Index, Node, Spread, Unary, Variable
 from scopes import display_name as shown
 from semantic.errors import SemanticError
 from typesys import BYTE_SLICE, INTEGER_TYPES, StructInfo, Type, TypeKind
@@ -124,22 +124,12 @@ class CallChecker:
         if name not in self.decls.functions or not visible:  # another module's extern needs an import too
             raise SemanticError(f"Call to undeclared function '{shown(name)}'", expr)
         param_types, return_type = self.decls.functions[name]
-        self._record_call(expr, name)
-
-        if len(expr.args) != len(param_types):
-            raise SemanticError(
-                f"Function '{shown(name)}' expects {len(param_types)} "
-                f"argument(s), got {len(expr.args)}",
-                expr,
-            )
-        for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            actual_type = self.checker.check_value_flowing_into_allowing_struct_literal(arg, expected_type)
-            if not self.checker.types_compatible(actual_type, expected_type):
-                raise SemanticError(
-                    f"Argument {i} to '{shown(name)}' should be "
-                    f"{expected_type}, got {actual_type}" + self.checker.sum_gap(actual_type, expected_type, arg),
-                    arg,
-                )
+        args = self._check_args(expr, param_types, name in self.decls.variadic, f"Function '{shown(name)}'",
+                                f"'{shown(name)}'")
+        if args is expr.args:
+            self._record_call(expr, name)
+        else:  # (with the variadic parameter's arguments as one)
+            self.facts.calls[expr.nid] = (name, args)
         return return_type
 
     def _check_method_call(self, expr: Call) -> Type:
@@ -200,25 +190,49 @@ class CallChecker:
                 receiver = Unary(op=UnaryOp.ADDRESS_OF, operand=receiver,
                                  line=receiver.line, col=receiver.col, file=receiver.file)
                 self.checker.check_expr(receiver)
-        if len(expr.args) != len(param_types):
-            raise SemanticError(
-                f"Method '{expr.name}' on '{shown(owner)}' "
-                f"expects {len(param_types)} argument(s), got "
-                f"{len(expr.args)}",
-                expr,
-            )
-        for i, (arg, expected_type) in enumerate(zip(expr.args, param_types), start=1):
-            actual_type = self.checker.check_value_flowing_into_allowing_struct_literal(arg, expected_type)
-            if not self.checker.types_compatible(actual_type, expected_type):
-                raise SemanticError(
-                    f"Argument {i} to method '{expr.name}' on "
-                    f"'{shown(owner)}' should be "
-                    f"{expected_type}, got {actual_type}" + self.checker.sum_gap(actual_type, expected_type, arg),
-                    arg,
-                )
-        self.facts.calls[expr.nid] = (mangled_name, [receiver] + list(expr.args))
+        method = f"method '{expr.name}' on '{shown(owner)}'"
+        args = self._check_args(expr, param_types, key in self.decls.variadic, method[0].upper() + method[1:], method)
+        self.facts.calls[expr.nid] = (mangled_name, [receiver] + list(args))
         self.facts.types[expr.nid] = return_type
         return return_type
+
+    def _check_args(self, expr: Call, param_types: list, variadic: bool, callee: str, to: str) -> list:
+        """The arguments of `expr` as the callee takes them, checked against `param_types`. A variadic
+        callee's last parameter is given what follows the others: packed into a slice literal, or one
+        slice spread (`xs...`). `callee` and `to` name it in an error, as its subject and after 'to'."""
+        args = list(expr.args)
+        spread = args[-1] if args and isinstance(args[-1], Spread) else None
+        fixed = len(param_types) - 1 if variadic else len(param_types)
+        if spread is not None and not variadic:
+            raise SemanticError(
+                f"{callee} has no variadic parameter, so it can't be given a slice spread with '...'", spread)
+        if not variadic and len(args) != fixed:
+            raise SemanticError(f"{callee} expects {fixed} argument(s), got {len(args)}", expr)
+        if variadic and spread is not None and len(args) != fixed + 1:
+            raise SemanticError(
+                f"{callee} expects {fixed} argument(s) before the spread slice, got {len(args) - 1} -- "
+                f"a spread slice is all of a variadic parameter's arguments", expr)
+        if variadic and len(args) < fixed:
+            raise SemanticError(f"{callee} expects at least {fixed} argument(s), got {len(args)}", expr)
+        for i, (arg, expected_type) in enumerate(zip(args[:fixed], param_types), start=1):
+            self._check_arg(arg, expected_type, i, to)
+        if not variadic:
+            return expr.args
+        if spread is not None:
+            self._check_arg(spread.value, param_types[-1], fixed + 1, to)
+            return args[:fixed] + [spread.value]
+        packed = args[fixed:]
+        for i, arg in enumerate(packed, start=fixed + 1):
+            self._check_arg(arg, param_types[-1].element_type, i, to)
+        at = packed[0] if packed else expr
+        return args[:fixed] + [ArrayLiteral(elements=packed, line=at.line, col=at.col, file=at.file)]
+
+    def _check_arg(self, arg: Node, expected_type: Type, i: int, to: str) -> None:
+        actual_type = self.checker.check_value_flowing_into_allowing_struct_literal(arg, expected_type)
+        if not self.checker.types_compatible(actual_type, expected_type):
+            raise SemanticError(
+                f"Argument {i} to {to} should be {expected_type}, got {actual_type}"
+                + self.checker.sum_gap(actual_type, expected_type, arg), arg)
 
     def check_print_call(self, expr: Call) -> Type:
         """`print(x)` for any non-void type."""

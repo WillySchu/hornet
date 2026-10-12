@@ -183,8 +183,8 @@ def bool _space_before(Token cur, bool cur_unary, State s):
         return false
     if _is_closer(cur):
         return false
-    if cur.kind == TokenKind.Op and (ct == ',' or ct == ';'):
-        return false
+    if cur.kind == TokenKind.Op and (ct == ',' or ct == ';' or ct == '...'):
+        return false  # (`int... xs`, `f(xs...)`)
     if p.kind == TokenKind.Op and (pt == ',' or pt == ';'):
         return true
     if cur.kind == TokenKind.Op and ct == ':':

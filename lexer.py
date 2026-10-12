@@ -24,6 +24,7 @@ class TokenType(Enum):
     SEMICOLON = auto()
     COMMA = auto()
     DOT = auto()
+    ELLIPSIS = auto()  # `...`: a variadic parameter, or a slice spread into one
 
     ASSIGN = auto()
     PLUS = auto()
@@ -227,6 +228,7 @@ class Lexer:
             ('AMPERSAND',     r'&'),
             ('PIPE',          r'\|'),
             ('CARET',         r'\^'),
+            ('ELLIPSIS',      r'\.\.\.'),
             ('DOT',           r'\.'),
 
             ('COMMENT',       r'#[^\n]*'),  # Stops before '\n' so NEWLINE is still emitted.
@@ -348,6 +350,8 @@ class Lexer:
                 self.tokens.append(Token(TokenType.SHIFT_RIGHT_ASSIGN, value, self.line, column))
             elif kind == 'DOT':
                 self.tokens.append(Token(TokenType.DOT, value, self.line, column))
+            elif kind == 'ELLIPSIS':
+                self.tokens.append(Token(TokenType.ELLIPSIS, value, self.line, column))
             elif kind == 'COMMENT':
                 continue
             elif kind == 'SKIP':

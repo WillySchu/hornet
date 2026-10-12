@@ -34,6 +34,7 @@ class Declarations:
     # (struct or enum, method) -> (param types, return type, mangled name)
     methods: Dict[Tuple[str, str], Tuple[List[Type], Type, str]] = dataclasses.field(default_factory=dict)
     pointer_receivers: set = dataclasses.field(default_factory=set)  # (struct or enum, method) with a `*receiver`
+    variadic: set = dataclasses.field(default_factory=set)  # functions, and (struct or enum, method), ending `T... xs`
     functions: Dict[str, tuple] = dataclasses.field(default_factory=dict)  # name -> (param types, return type)
     extern_names: set = dataclasses.field(default_factory=set)
     intrinsic_original_names: dict = dataclasses.field(default_factory=dict)  # mangled name -> the intrinsic's own
@@ -184,6 +185,8 @@ class DeclarationResolver:
                 raise SemanticError(f"Function '{shown(fn.name)}' is already declared", fn)
             param_types = [self._type(p.type, p) for p in fn.params]
             self.decls.functions[fn.name] = (param_types, self._return_type(fn))
+            if fn.params and fn.params[-1].variadic:
+                self.decls.variadic.add(fn.name)
 
     def _collect_enums(self, enum_defs: List[EnumDef]) -> Dict[str, EnumInfo]:
         """The enum registry: each enum's members, distinct and at least one."""
@@ -507,6 +510,8 @@ class DeclarationResolver:
                 ]
                 return_type = self._return_type(md)
                 methods[(sd.name, md.name)] = (param_types, return_type, mangle_method_name(sd.name, md.name))
+                if md.params and md.params[-1].variadic:
+                    self.decls.variadic.add((sd.name, md.name))
                 if md.receiver_is_pointer:
                     self.decls.pointer_receivers.add((sd.name, md.name))
         return methods
