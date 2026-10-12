@@ -1,8 +1,8 @@
-"""Escape analysis: which locals must live on the heap.
+"""Escape analysis: which locals, and which literals' storage, must live on the heap.
 
 Flow-insensitive, field-insensitive points-to analysis over one
 function. Each storage location t (local, param, for-in binding, `&S()`
-literal, heap literal, or EXT = memory not owned by this frame) has
+or slice literal, heap literal, or EXT = memory not owned by this frame) has
 H[t]: the locations whose addresses may be stored inside t. An
 expression's value is the set of locations it may point into.
 
@@ -19,9 +19,13 @@ contents escape and their memory may come to hold EXT. Calls without a
 summary (externs, intrinsics) escape every argument.
 
 Runs on the typed tree (typed_ast.py). Storage declared inside a loop (body declarations, the
-loop variable, for-in bindings, `&S()` literals) is fresh on each iteration, so it also needs the heap when a location
-declared outside that loop may come to hold its address: the address would outlive the
-iteration that created it."""
+loop variable, for-in bindings, `&S()` and slice literals) is fresh on each iteration, so it also
+needs the heap when a location declared outside that loop may come to hold its address: the address
+would outlive the iteration that created it. A three-clause loop's own variable counts as outside for
+what it holds, which the next iteration starts with.
+
+A literal that needs no heap is kept in the frame, in a slot of its own (ir/typed_builder.py): it
+is gone when the function returns, and written afresh each time its expression is evaluated."""
 
 from dataclasses import fields
 from typing import Optional, Union
@@ -40,7 +44,8 @@ def is_heap_allocated(type_: Type, structs: dict[str, StructInfo], sum_types: di
         type_byte_width(type_, structs, sum_types) > _STACK_ARRAY_LIMIT_BYTES
 
 
-# A declaration's Symbol.id, or ('literal', nid) for an `&S()` struct literal's storage.
+# A declaration's Symbol.id, or ('literal', nid) for the storage of an `&S()` struct literal or of a
+# slice literal's elements.
 DeclId = Union[int, tuple]
 
 
@@ -60,8 +65,21 @@ def _heap(node) -> tuple:
 
 
 def _literal(node) -> tuple:
-    """An `S(...)` struct literal's own storage, which may need the heap like a variable's."""
+    """The storage of an `S(...)` struct literal, or of a slice literal's elements, which may need the
+    heap like a variable's."""
     return ('literal', node.nid)
+
+
+def literal_on_heap(node, heap: set, structs: dict[str, StructInfo], sum_types: dict) -> bool:
+    """Whether literal `node`'s storage (see _literal) must be on the heap, `heap` being what
+    analyze_array_escapes gave for its function: it escapes, or is too large for the stack."""
+    if _literal(node) in heap:
+        return True
+    if isinstance(node, t.SliceLiteral):
+        size = len(node.elements) * type_byte_width(node.type.element_type, structs, sum_types)
+    else:
+        size = type_byte_width(node.type, structs, sum_types)
+    return size > _STACK_ARRAY_LIMIT_BYTES
 
 
 _NO_POINTERS = (t.IntLit, t.EnumMember, t.BoolLit, t.StrLit, t.NoneLit, t.ZeroValue, t.NewEmptyDict, t.EmptySlice)
@@ -92,10 +110,12 @@ class EscapeAnalyzer:
         return {loc for loc in heap if loc != EXT and not (isinstance(loc, tuple) and loc[0] in ('heap', 'param'))}
 
     def _iteration_escapes(self) -> set:
-        """Locations declared inside some loop whose address may be held outside it."""
+        """Locations declared inside some loop whose address may be held outside it, or by what the loop
+        carries from one iteration to the next."""
         out = set()
-        for inner in _loop_scopes(self.fn.body):
-            reached = [u for loc, held in self.H.items() if loc not in inner for u in held if u in inner]
+        for inner, carried in _loop_scopes(self.fn.body):
+            reached = [u for loc, held in self.H.items() if loc not in inner or loc in carried
+                       for u in held if u in inner]
             while reached:
                 u = reached.pop()
                 if u not in out:
@@ -223,7 +243,9 @@ class EscapeAnalyzer:
         if isinstance(e, t.StructLiteral):
             return set().union(*(self.vals(f) for f in e.fields)) if e.fields else set()
         if isinstance(e, (t.ArrayLiteral, t.SliceLiteral)):
-            loc = _heap(e)
+            # A slice literal's elements are stored somewhere the slice points into: a place of the
+            # literal's own, which the heap is needed for only if the slice outlives it.
+            loc = _literal(e) if isinstance(e, t.SliceLiteral) else _heap(e)
             elems = set()
             for x in e.elements:
                 elems |= self.vals(x)
@@ -327,7 +349,7 @@ def _children(node) -> list:
 
 
 def _declared_within(nodes: list) -> set:
-    """Locations declared anywhere in `nodes` (DeclIds, including `&S()` literal locations)."""
+    """Locations declared anywhere in `nodes` (DeclIds, including `&S()` and slice literal locations)."""
     out = set()
     stack = list(nodes)
     while stack:
@@ -338,7 +360,7 @@ def _declared_within(nodes: list) -> set:
             out.update(symbol.id for symbol in node.bindings)
         elif isinstance(node, t.ForMembers):
             out.add(node.binding.id)
-        elif isinstance(node, t.StructLiteral):
+        elif isinstance(node, (t.StructLiteral, t.SliceLiteral)):
             out.add(_literal(node))
         stack.extend(_children(node))
     return out
@@ -346,18 +368,23 @@ def _declared_within(nodes: list) -> set:
 
 def _loop_scopes(statements) -> list:
     """For each loop in `statements`, the set of locations declared inside it (loop variable and
-    for-in bindings included)."""
+    for-in bindings included), and those of them whose contents one iteration leaves to the next."""
     scopes = []
     stack = list(statements)
     while stack:
         node = stack.pop()
         if isinstance(node, t.ForIn):
             # The iterable is evaluated once, before the first iteration.
-            scopes.append(_declared_within(list(node.body)) | {symbol.id for symbol in node.bindings})
+            scopes.append((_declared_within(list(node.body)) | {symbol.id for symbol in node.bindings}, set()))
         elif isinstance(node, t.ForMembers):
-            scopes.append(_declared_within(list(node.body)) | {node.binding.id})
-        elif isinstance(node, (t.While, t.For)):
-            scopes.append(_declared_within(_children(node)))
+            scopes.append((_declared_within(list(node.body)) | {node.binding.id}, set()))
+        elif isinstance(node, t.While):
+            scopes.append((_declared_within(_children(node)), set()))
+        elif isinstance(node, t.For):
+            # The init clause is evaluated once, before the first iteration. Its variable has storage of
+            # its own each iteration, but starts with what it held at the end of the last.
+            carried = {node.init.symbol.id} if isinstance(node.init, t.Declare) else set()
+            scopes.append((_declared_within([node.cond, node.step, *node.body]) | carried, carried))
         stack.extend(_children(node))
     return scopes
 

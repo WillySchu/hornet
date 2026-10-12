@@ -12933,6 +12933,27 @@ class TestFreshStoragePerIteration:
                      "    print(all[0][0] + all[1][0] * 10 + all[2][0] * 100)\n"
                      "    return 0\n",
                      "210\n", id='array var slice in loop'),
+        # A three-clause loop's variable starts each iteration with what it held at the end of the last,
+        # so what it points to has to outlast the iteration that made it.
+        pytest.param("def int main():\n"
+                     "    int n = 0\n"
+                     "    for []int last = []int[]; n < 3; n += 1:\n"
+                     "        [2]int a = [n, n * 10]\n"
+                     "        print(last)\n"
+                     "        last = a[:]\n"
+                     "    return 0\n",
+                     "[]int[]\n[]int[0, 0]\n[]int[1, 10]\n", id='for loop var holds last iteration array'),
+        pytest.param("def int main():\n"
+                     "    int n = 0\n"
+                     "    for []int xs = [0, 1]; n < 4; n += 1:\n"
+                     "        xs = [xs[1], xs[0] + xs[1]]\n"
+                     "        print(xs)\n"
+                     "    for []int ys = [0, 1]; n < 7; ys = [ys[1], ys[0] + ys[1]]:\n"
+                     "        print(ys)\n"
+                     "        n += 1\n"
+                     "    return 0\n",
+                     "[]int[1, 1]\n[]int[1, 2]\n[]int[2, 3]\n[]int[3, 5]\n"
+                     "[]int[0, 1]\n[]int[1, 1]\n[]int[1, 2]\n", id='for loop var holds last iteration literal'),
         pytest.param("def int main():\n"
                      "    []*int ps\n"
                      "    int i = 0\n"

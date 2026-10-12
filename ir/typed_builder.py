@@ -9,7 +9,7 @@ needed) and `write_into(dst, e)` stores one; a str is read as (ptr, len) and a s
 from dataclasses import fields, replace
 
 import typed_ast as t
-from escape_analysis import analyze_array_escapes, is_heap_allocated
+from escape_analysis import analyze_array_escapes, is_heap_allocated, literal_on_heap
 from ir.panics import PanicBlocks, located, message_label
 from ir.typedesc import type_descriptor
 from ir.ir import (
@@ -159,6 +159,17 @@ class TypedFunctionBuilder:
             return [], base
         address = self.temp()
         return [IRBinOp(dst=address, op=BinaryOp.ADD, left=base, right=IRConst(amount, Type.INT64))], address
+
+    def literal_storage(self, literal, size: int) -> tuple:
+        """(IR, address) of `size` bytes for the storage of `literal`, an `&S(...)` or a slice
+        literal: in the frame, unless escape analysis found that what points to it may outlive the
+        frame (or the loop's iteration) it was made in."""
+        address = self.temp()
+        registry = self.ir_program
+        if literal_on_heap(literal, self.heap_ids, registry.struct_registry, registry.sum_type_registry):
+            return [IRCall(dst=address, name='hornet_alloc', args=[IRConst(size, Type.INT64)])], address
+        slot = self.ids.new_slot(size, "literal", self.ir_fn)
+        return [IRLocalAddress(dst=address, slot=slot)], address
 
     def scratch_address(self, type_: Type) -> tuple:
         """New temporary storage for a composite value: a slot, or the heap if it is too large for the
@@ -863,8 +874,7 @@ class TypedFunctionBuilder:
         if isinstance(e, t.SliceLiteral):
             element_type = e.type.element_type
             count = len(e.elements)
-            ptr = self.temp()
-            ir = [IRCall(dst=ptr, name='hornet_alloc', args=[IRConst(count * self.width(element_type), Type.INT64)])]
+            ir, ptr = self.literal_storage(e, count * self.width(element_type))
             for i, value in enumerate(e.elements):
                 offset_ir, address = self.offset(ptr, i * self.width(element_type))
                 ir += offset_ir + self.store(address, value)
@@ -1032,9 +1042,8 @@ class TypedFunctionBuilder:
         place = e.place
         if isinstance(place, t.StructLiteral):
             # `&S(...)`: its own storage, on the heap when the pointer may outlive this frame.
-            box = self.temp()
-            return [IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(place.type), Type.INT64)])] + \
-                self.write_into(box, place), box
+            ir, box = self.literal_storage(place, self.width(place.type))
+            return ir + self.write_into(box, place), box
         if isinstance(place, t.Local) and _scalar(place.type):
             temp, heap = self.bind(place.symbol)
             if heap:

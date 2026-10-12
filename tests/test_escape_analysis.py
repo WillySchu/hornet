@@ -79,6 +79,11 @@ def test_is_heap_allocated_array_str_heap():
 # TODO(will): Test Structs.
 
 
+def _literals(heap: set) -> int:
+    """How many literals `heap`, an analyze_array_escapes result, puts on the heap."""
+    return sum(1 for loc in heap if isinstance(loc, tuple) and loc[0] == 'literal')
+
+
 def test_analyze_array_escapes_empty():
     ast = parse_and_analyze("def f():\n    return\n")
     assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
@@ -89,16 +94,18 @@ def test_analyze_array_escapes_fn_on_uninitialized_slice():
     assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
 
 
-# TODO(will): I feel like this should escape?
 def test_analyze_array_escapes_fn_on_initialized_slice():
+    """A slice literal's storage is the frame's unless something may keep it: a callee nothing is known of
+    may, one known only to read it does not."""
     ast = parse_and_analyze("def f():\n    []int sl = [1, 2, 3]\n    fn(sl)\n\ndef fn([]int x):\n    print(len(x))\n")
-    assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
+    assert _literals(ea.analyze_array_escapes(ast.functions[0], {})) == 1
+    summaries = ea.compute_escape_summaries(ast.functions, {})
+    assert ea.analyze_array_escapes(ast.functions[0], {}, summaries) == set()
 
 
-# TODO(will): I feel like this should escape?
 def test_analyze_array_escapes_return_initialized_slice():
     ast = parse_and_analyze("def []int f():\n    []int sl = [1, 2, 3]\n    return sl\n")
-    assert ea.analyze_array_escapes(ast.functions[0], {}) == set()
+    assert _literals(ea.analyze_array_escapes(ast.functions[0], {})) == 1
 
 
 def test_analyze_array_escapes_return_sliced_array():
@@ -107,7 +114,6 @@ def test_analyze_array_escapes_return_sliced_array():
     assert len(ea.analyze_array_escapes(ast.functions[0], {})) == 1
 
 
-# TODO(will): I feel like this should escape?
 def test_test():
     source = '''
 def int main():
@@ -120,9 +126,10 @@ def print_ints([]int ints):
     print(ints)
 '''
     ast = parse_and_analyze(source)
-    main_res = ea.analyze_array_escapes(ast.functions[0], {})
+    summaries = ea.compute_escape_summaries(ast.functions, {})
+    main_res = ea.analyze_array_escapes(ast.functions[0], {}, summaries)
     assert main_res == set()
-    print_ints_res = ea.analyze_array_escapes(ast.functions[1], {})
+    print_ints_res = ea.analyze_array_escapes(ast.functions[1], {}, summaries)
     assert print_ints_res == set()
 
 
