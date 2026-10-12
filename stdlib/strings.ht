@@ -125,7 +125,7 @@ def str quoted(str s):
     b.write_byte("'")
     return b.to_str()
 
-# Converts a string to lower case.
+# `s` with ASCII capitals made lower case; other bytes, UTF-8 included, are left as they are.
 def str lower(str s):
     []byte out = bytes(s)
     for i, c in s:

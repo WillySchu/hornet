@@ -2,8 +2,6 @@
 
 import random
 
-import pytest
-
 from tests.targets import on_every_target, build_and_run
 from tests.test_compiler import GCC_SKIP
 from tests.test_os_output import compile_and_run
@@ -142,36 +140,16 @@ def test_compare_orders_like_bytes():
 
 
 @GCC_SKIP
-@pytest.mark.parametrize("source,expected", [
-    ("from 'std:strings' import lower\n"
-     "def int main():\n"
-     "    str a = 'x'\n"
-     "    str b = lower(a)\n"
-     "    print(b)\n"
-     "    return 0",
-     "x\n"),
-    ("from 'std:strings' import lower\n"
-     "def int main():\n"
-     "    str a = 'X'\n"
-     "    str b = lower(a)\n"
-     "    print(b)\n"
-     "    return 0",
-     "x\n"),
-    ("from 'std:strings' import lower\n"
-     "def int main():\n"
-     "    str a = 'XflkNjdkQk'\n"
-     "    str b = lower(a)\n"
-     "    print(b)\n"
-     "    return 0",
-     "xflknjdkqk\n"),
-    ("from 'std:strings' import lower\n"
-     "def int main():\n"
-     "    str a = 'Hello World!'\n"
-     "    str b = lower(a)\n"
-     "    print(b)\n"
-     "    return 0",
-     "hello world!\n"),
-])
-def test_lower(source, expected):
+def test_lower():
+    source = (
+        "from 'std:strings' import lower\n"
+        "def int main():\n"
+        "    print(lower('Hello World!'))\n"
+        "    print(lower('XflkNjdkQk'))\n"
+        "    print(lower('@AZ[`az{'))\n"                       # the bytes either side of A-Z and a-z stay
+        "    print(len(lower('')))\n"
+        "    str e = str(byte(195)) + str(byte(137))\n"         # UTF-8 for an upper-case E with an acute accent
+        "    print(lower('CAF' + e) == 'caf' + e)\n"            # is left as it is
+        "    return 0\n")
     result = on_every_target(lambda target: build_and_run(source, target))
-    assert result.stdout == expected
+    assert result.stdout == "hello world!\nxflknjdkqk\n@az[`az{\n0\ntrue\n"
