@@ -124,3 +124,11 @@ def str quoted(str s):
             b.write_byte(c)
     b.write_byte("'")
     return b.to_str()
+
+# Converts a string to lower case.
+def str lower(str s):
+    []byte out = bytes(s)
+    for i, c in s:
+        if c >= "A" and c <= "Z":
+            out[i] = c + 32
+    return str(out)

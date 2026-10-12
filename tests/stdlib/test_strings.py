@@ -2,6 +2,9 @@
 
 import random
 
+import pytest
+
+from tests.targets import on_every_target, build_and_run
 from tests.test_compiler import GCC_SKIP
 from tests.test_os_output import compile_and_run
 
@@ -9,6 +12,9 @@ _IMPORTS = (
     "from 'std:strings' import Builder, split, join, trim, repeat, starts_with, ends_with, index_of, index_of_byte\n"
     "from 'std:fmt' import int_to_str, int_to_hex, pad_left\n"
 )
+
+PAIRS = [("", ""), ("a", "a"), ("a", "b"), ("b", "a"), ("ab", "a"), ("a", "ab"), ("", "a"), ("Z", "a"),
+         ("abc", "abd"), ("key10", "key9"), ("caf\\xc3\\xa9", "cafz")]
 
 
 def _run(body: str) -> str:
@@ -35,7 +41,7 @@ def test_int_to_str_and_hex_match_python():
 def test_pad_left():
     assert _run(
         "print(pad_left('7', 3, \"0\"))\nprint(pad_left('1234', 3, \" \"))\nprint(pad_left('', 2, \"x\"))\nreturn 0") \
-        == "007\n1234\nxx\n"
+           == "007\n1234\nxx\n"
 
 
 @GCC_SKIP
@@ -95,3 +101,77 @@ def test_search_trim_repeat():
 def test_split_with_empty_separator_panics():
     r = compile_and_run(_IMPORTS + "def int main():\n    split('a', '')\n    return 0\n")
     assert r.returncode != 0 and 'empty separator' in r.stderr
+
+
+@GCC_SKIP
+def test_quoted():
+    source = (
+        "from 'std:strings' import quoted\n"
+        "def int main():\n"
+        "    print(quoted('plain'))\n"
+        "    print(quoted(''))\n"
+        "    print(quoted('it\\'s a \\\\ and\\ttab\\nline\\r'))\n"
+        "    print(quoted(str(byte(1)) + str(byte(31)) + str(byte(127)) + str(byte(0))))\n"
+        "    print(quoted('caf' + str(byte(195)) + str(byte(169))))\n"      # UTF-8 is left as it is
+        "    print(format('unknown name {}', quoted('x y')))\n"
+        "    return 0\n")
+    result = on_every_target(lambda target: build_and_run(source, target))
+    assert result.stdout.split("\n")[:4] == [
+        "'plain'", "''", "'it\\'s a \\\\ and\\ttab\\nline\\r'", "'\\x01\\x1f\\x7f\\x00'"]
+    assert result.stdout.split("\n")[5] == "unknown name 'x y'"
+
+
+@GCC_SKIP
+def test_compare_orders_like_bytes():
+    calls = "".join(f"    print(sign(compare('{a}', '{b}')))\n" for a, b in PAIRS)
+    source = (
+            "from 'std:strings' import compare\n"
+            "def int sign(int n):\n"
+            "    if n < 0:\n"
+            "        return -1\n"
+            "    if n > 0:\n"
+            "        return 1\n"
+            "    return 0\n"
+            "def int main():\n" + calls + "    return 0\n")
+    result = on_every_target(lambda target: build_and_run(source, target))
+
+    def as_bytes(text: str) -> bytes:
+        return text.encode().decode('unicode_escape').encode('latin-1')
+    expected = [(as_bytes(a) > as_bytes(b)) - (as_bytes(a) < as_bytes(b)) for a, b in PAIRS]
+    assert result.stdout.split() == [str(sign) for sign in expected]
+
+
+@GCC_SKIP
+@pytest.mark.parametrize("source,expected", [
+    ("from 'std:strings' import lower\n"
+     "def int main():\n"
+     "    str a = 'x'\n"
+     "    str b = lower(a)\n"
+     "    print(b)\n"
+     "    return 0",
+     "x\n"),
+    ("from 'std:strings' import lower\n"
+     "def int main():\n"
+     "    str a = 'X'\n"
+     "    str b = lower(a)\n"
+     "    print(b)\n"
+     "    return 0",
+     "x\n"),
+    ("from 'std:strings' import lower\n"
+     "def int main():\n"
+     "    str a = 'XflkNjdkQk'\n"
+     "    str b = lower(a)\n"
+     "    print(b)\n"
+     "    return 0",
+     "xflknjdkqk\n"),
+    ("from 'std:strings' import lower\n"
+     "def int main():\n"
+     "    str a = 'Hello World!'\n"
+     "    str b = lower(a)\n"
+     "    print(b)\n"
+     "    return 0",
+     "hello world!\n"),
+])
+def test_lower(source, expected):
+    result = on_every_target(lambda target: build_and_run(source, target))
+    assert result.stdout == expected
