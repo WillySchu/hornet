@@ -72,7 +72,6 @@ def test_what_does_not_parse(source, message):
     ("p.check(1)", "Argument 1 to method 'check' on 'Parser' should be Kind, got int"),
     ("p.check(Kind.Int, ks...)", "Method 'check' on 'Parser' expects 0 argument\\(s\\) before the spread slice"),
     ("print(xs...)", "A slice spread with '...' can only be given to a variadic parameter"),
-    ("xs = append(xs, xs...)", "can only be given to a variadic parameter"),
     ("len(xs...)", "can only be given to a variadic parameter"),
     ("Parser q = Parser(ks...)", "can only be given to a variadic parameter"),
     ("Kind k = Kind(xs...)", "can only be given to a variadic parameter"),

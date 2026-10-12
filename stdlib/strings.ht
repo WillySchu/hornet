@@ -6,8 +6,7 @@ type Builder struct:
     []byte _buf
 
     def write(*b, str s):
-        for int i = 0; i < len(s); i += 1:
-            b._buf = append(b._buf, s[i])
+        b._buf = append(b._buf, s...)
 
     def write_byte(*b, byte x):
         b._buf = append(b._buf, x)

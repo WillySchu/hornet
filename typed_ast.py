@@ -378,6 +378,14 @@ class Append(Expr):
 
 
 @dataclass(frozen=True)
+class AppendAll(Expr):
+    """`append(s, vs...)`, and `append(s, a, b, ...)` with `values` their slice literal: each element of
+    `values` (a slice of `s`'s type, or a str's bytes for a []byte) after `s`'s own."""
+    slice: Expr
+    values: Expr
+
+
+@dataclass(frozen=True)
 class Print(Expr):
     value: Expr
 

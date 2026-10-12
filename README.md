@@ -571,6 +571,19 @@ def never fail(str what):
 
 A trailing comma is allowed after the last parameter or argument, and after the last element or entry of an array, slice, or dictionary literal.
 
+The last parameter may be variadic, `T... name`, a `[]T` inside the function. A call gives it the arguments after the others, or one slice spread as them with `...`:
+
+```hornet
+def bool check(Kind at, Kind... kinds):
+    return at in kinds
+
+check(k, Kind.Int, Kind.Str)
+check(k)                        # kinds is empty
+check(k, wanted...)             # wanted itself, not a copy
+```
+
+Each argument flows into `T` as into a variable of that type. A spread slice is a `[]T` and is all of the variadic parameter's arguments. Methods may be variadic; an `extern` or intrinsic may not.
+
 Recursive functions are supported:
 
 ```hornet
@@ -702,7 +715,7 @@ Appending may allocate a new backing store:
 values = append(values, 4)
 ```
 
-When the backing store is full, capacity grows to 1, then doubles up to 256, then grows by a quarter; the compiled code picks the new capacity and `hornet_slice_grow` in the runtime copies the elements.
+When the backing store is full, capacity grows to 1, then doubles up to 256, then grows by a quarter, or to what is needed if several elements are added and that is more; the compiled code picks the new capacity and `hornet_slice_grow` in the runtime copies the elements.
 
 ---
 
@@ -776,7 +789,7 @@ for int i = 0; i < 10; i += 1:
     print(i)
 ```
 
-The initialization clause is currently a variable declaration, and the increment clause is any assignment. A loop variable whose address may outlive an iteration gets new storage each iteration.
+The initialization clause is currently a variable declaration, and the increment clause is any assignment. A loop variable whose address may outlive an iteration gets new storage each iteration. Each iteration starts with the value the last one left in the variable, and what that value points to is still there.
 
 ## `for ... in ...`
 
@@ -1043,12 +1056,17 @@ print(len('hello'))
 
 ## `append`
 
-`append` adds an element to a slice and returns the resulting slice:
+`append` adds one or more elements to a slice, or a slice's elements spread with `...`, and returns the resulting slice:
 
 ```hornet
 []int values = []int[1, 2]
 values = append(values, 3)
+values = append(values, 4, 5)
+values = append(values, more...)
+buf = append(buf, 'text'...)    # a str's bytes, into a []byte
 ```
+
+What is added is read in full before any of it is written, so a slice may be appended to itself, or to a slice of itself. `append` needs something to add.
 
 ## `bytes`
 
@@ -1229,6 +1247,7 @@ str t = trim('  padded \n')
 str r = repeat('ab', 3)
 int order = compare('apple', 'pear')   # negative, zero, or positive: which comes first, by bytes
 str q = quoted('it\'s')                 # the str as a literal: 'it\'s', quotes and escapes included
+str l = lower('Hello')                 # 'hello': ASCII capitals only
 ```
 
 `compare` gives the order `<` does, as one three-way answer. `quoted` is for showing a string in a message without ambiguity: control bytes are escaped, and UTF-8 text is left as it is.
@@ -1383,7 +1402,7 @@ Both frontend stages are packages. The parser (`parser/`) is functions over a to
 
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. Only the functions `main` can reach through calls are built: every function is type-checked, but one that can never run is not compiled, and neither are the strings and descriptors only it uses, so importing a module costs what is used of it. (Calls are all resolved by then, and nothing else can call a function. A program without `main` keeps every function.) The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
 
-Escape analysis decides which locals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x` to a function that doesn't keep the pointer leaves `x` on the stack.
+Escape analysis decides which locals, slice literals, and `&S(...)` literals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x`, `[a, b]`, or `&Point(a, b)` to a function that doesn't keep it leaves it on the stack (a variadic call's packed arguments are a slice literal). Storage made in a loop also needs the heap when something from outside the loop, or the loop's own variable, may hold it into a later iteration.
 
 IR construction compiles conditions made of `and`, `or`, and `not` straight to branches, and copies a composite value directly between places (two places of one type are the same storage or disjoint). A deferred call's operands are stored in variables of their own where the `defer` is, and the call is emitted on each path out of its block, so nothing about it is decided at run time. Loads, stores, and copies address memory as a base plus a constant offset.
 
@@ -1555,7 +1574,7 @@ Hornet is still experimental. Some notable limitations are:
 * The standard library currently provides only a small subset of filesystem, process, path, formatting, and collection facilities.
 * Generic types and generic functions are not implemented.
 * First-class function types and closures are not implemented.
-* Variadic functions and variadic FFI calls are not implemented.
+* Calls to C's variadic functions (such as `printf`) are not supported.
 * There is no garbage collector yet; string concatenation in particular never frees its intermediate strings.
 * There are no floating-point types yet.
 * There is no TLS: `stdlib/http.ht` makes plain `http://` requests only.

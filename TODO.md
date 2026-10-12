@@ -43,7 +43,6 @@ Updates:
 - Dict equality?
 - Import \*?
 - Variadic FFI calls?
-- Make `append` variadic.
 - As binding in a while condition?
 - Enums. Explicit member values, ordering?
 - float

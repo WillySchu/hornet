@@ -332,13 +332,14 @@ class CallChecker:
         return Type.INT
 
     def check_append_call(self, expr: Call) -> Type:
-        """`append(s, v)` returns a new slice."""
-        if len(expr.args) != 2:
-            raise SemanticError(
-                f"'append' expects exactly 2 arguments, got {len(expr.args)}",
-                expr,
-            )
-        slice_arg, value_arg = expr.args
+        """`append(s, v, ...)`, or `append(s, vs...)`: a slice of `s`'s type with the values, or the
+        elements of slice `vs` (the bytes of a str, for a []byte), after `s`'s own."""
+        if not expr.args:
+            raise SemanticError("'append' expects a slice and what to add to it, got nothing", expr)
+        slice_arg, added = expr.args[0], expr.args[1:]
+        if isinstance(slice_arg, Spread):
+            raise SemanticError("'append' takes the slice to add to as itself, not spread: `append(xs, ys...)`",
+                                slice_arg)
         slice_type = self.checker.check_expr(slice_arg)
         if slice_type.kind != TypeKind.SLICE:
             raise SemanticError(
@@ -346,15 +347,37 @@ class CallChecker:
                 f"got {slice_type}",
                 slice_arg,
             )
-        value_type = self.checker.check_value_flowing_into_allowing_struct_literal(value_arg, slice_type.element_type)
-        if not self.checker.types_compatible(value_type, slice_type.element_type):
-            raise SemanticError(
-                f"'append' cannot append a value of type {value_type} "
-                f"to a {slice_type} (element type "
-                f"{slice_type.element_type})",
-                value_arg,
-            )
+        if not added:
+            raise SemanticError("'append' needs something to add after the slice", expr)
+        if isinstance(added[-1], Spread):
+            if len(added) > 1:
+                raise SemanticError(
+                    f"'append' takes a spread slice (`xs...`) as all it adds, got {len(added) - 1} value(s) "
+                    f"before it", expr)
+            self._check_appended_spread(added[0].value, slice_type)
+            return slice_type
+        for value_arg in added:
+            value_type = self.checker.check_value_flowing_into_allowing_struct_literal(
+                value_arg, slice_type.element_type)
+            if not self.checker.types_compatible(value_type, slice_type.element_type):
+                raise SemanticError(
+                    f"'append' cannot append a value of type {value_type} "
+                    f"to a {slice_type} (element type "
+                    f"{slice_type.element_type})",
+                    value_arg,
+                )
         return slice_type
+
+    def _check_appended_spread(self, values: Node, slice_type: Type) -> None:
+        """`vs` of `append(s, vs...)`: a slice of `s`'s type, or a str when `s` is a []byte."""
+        values_type = self.checker.check_value_flowing_into(values, slice_type)
+        if slice_type == BYTE_SLICE and values_type == Type.STR:
+            return
+        if not self.checker.types_compatible(values_type, slice_type):
+            also = " (or a str's bytes)" if slice_type == BYTE_SLICE else ""
+            raise SemanticError(
+                f"'append' can't spread a value of type {values_type} into a {slice_type} -- what is spread "
+                f"is a {slice_type}{also}", values)
 
     def check_bytes_call(self, expr: Call) -> Type:
         """`bytes(s)`: a new []byte copy of str s."""

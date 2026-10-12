@@ -356,7 +356,15 @@ class TypedTreeBuilder:
             return typed.Len(Type.INT, self.expr(args[0]))
         if name == 'append':
             s = self.expr(args[0])
-            return typed.Append(s.type, s, self.convert(args[1], s.type.element_type))
+            added = args[1:]
+            if isinstance(added[0], syntax.Spread):
+                values = added[0].value
+                spread = self.expr(values) if self.ty(values) == Type.STR else self.convert(values, s.type)
+                return typed.AppendAll(s.type, s, spread)
+            if len(added) == 1:
+                return typed.Append(s.type, s, self.convert(added[0], s.type.element_type))
+            elements = tuple(self.convert(v, s.type.element_type) for v in added)
+            return typed.AppendAll(s.type, s, self._at(typed.SliceLiteral(s.type, elements), added[0]))
         if name == 'del':
             d = self.expr(args[0])
             return typed.DictDelete(Type.VOID, d, self.convert(args[1], d.type.key_type))

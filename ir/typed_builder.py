@@ -895,6 +895,8 @@ class TypedFunctionBuilder:
             return ir + slice_ir, new_ptr, new_len, new_cap
         if isinstance(e, t.Append):
             return self.append(e)
+        if isinstance(e, t.AppendAll):
+            return self.append_all(e)
         if isinstance(e, t.BytesFromStr):
             str_ir, ptr, length = self.str_value(e.value)
             scratch_ir, address = self.scratch_address(e.type)
@@ -1543,6 +1545,64 @@ class TypedFunctionBuilder:
             IRLoad(dst=length, address=len_address)
         ] + cap_ir + [IRLoad(dst=cap, address=cap_address)], ptr, length, cap
 
+    def grown_capacity(self, new_cap, cap) -> list:
+        """`new_cap` = the capacity a full slice of capacity `cap` grows to: 1 from 0, doubling below
+        256, then by a quarter."""
+        is_zero, is_small, quarter = self.temp(Type.BOOL), self.temp(Type.BOOL), self.temp(Type.INT)
+        zero = self.ids.new_label('cap_zero')
+        nonzero = self.ids.new_label('cap_nonzero')
+        small = self.ids.new_label('cap_small')
+        large = self.ids.new_label('cap_large')
+        ready = self.ids.new_label('cap_ready')
+        return [
+            IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=cap, right=IRConst(0, Type.INT)),
+            IRBranch(cond=is_zero, true_label=zero, false_label=nonzero),
+            IRLabel(zero), IRMove(dst=new_cap, src=IRConst(1, Type.INT)), IRJump(ready),
+            IRLabel(nonzero), IRBinOp(dst=is_small, op=BinaryOp.LESS_THAN, left=cap, right=IRConst(256, Type.INT)),
+            IRBranch(cond=is_small, true_label=small, false_label=large),
+            IRLabel(small), IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=cap), IRJump(ready),
+            IRLabel(large), IRBinOp(dst=quarter, op=BinaryOp.SHIFT_RIGHT, left=cap, right=IRConst(2, Type.INT)),
+            IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=quarter), IRJump(ready),
+            IRLabel(ready),
+        ]
+
+    def append_all(self, e: t.AppendAll) -> tuple:
+        """Room for all of `e.values` after the slice's own elements (in place when there is the
+        capacity; otherwise grown as append grows, or to just what is needed if that is more), then
+        the values copied in. They are evaluated before anything is written, and may overlap it."""
+        element_type = e.type.element_type
+        width = IRConst(self.width(element_type), Type.INT)
+        ir, ptr, length, cap = self.slice_value(e.slice)
+        if e.values.type == Type.STR:
+            values_ir, source, count = self.str_value(e.values)
+        else:
+            values_ir, source, count, _ = self.slice_value(e.values)
+        out_ptr, out_cap, new_len, full, short, grown = (self.temp(), self.temp(Type.INT), self.temp(Type.INT),
+                                                         self.temp(Type.BOOL), self.temp(Type.BOOL), self.temp())
+        grow = self.ids.new_label('append_all_grow')
+        exactly = self.ids.new_label('append_all_exactly')
+        allocate = self.ids.new_label('append_all_allocate')
+        copy = self.ids.new_label('append_all_copy')
+        ir += values_ir + [
+            IRBinOp(dst=new_len, op=BinaryOp.ADD, left=length, right=count),
+            IRMove(dst=out_ptr, src=ptr),
+            IRMove(dst=out_cap, src=cap),
+            IRBinOp(dst=full, op=BinaryOp.GREATER_THAN, left=new_len, right=cap),
+            IRBranch(cond=full, true_label=grow, false_label=copy),
+            IRLabel(grow),
+        ] + self.grown_capacity(out_cap, cap) + [
+            IRBinOp(dst=short, op=BinaryOp.LESS_THAN, left=out_cap, right=new_len),
+            IRBranch(cond=short, true_label=exactly, false_label=allocate),
+            IRLabel(exactly), IRMove(dst=out_cap, src=new_len), IRJump(allocate),
+            IRLabel(allocate),
+            IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, out_cap, width]),
+            IRMove(dst=out_ptr, src=grown),
+            IRJump(copy),
+            IRLabel(copy),
+            IRCall(dst=None, name='hornet_copy_items', args=[out_ptr, length, source, count, width]),
+        ]
+        return ir, out_ptr, new_len, out_cap
+
     def append(self, e: t.Append) -> tuple:
         """Write in place when there is spare capacity; otherwise grow (cap 0 -> 1, doubling below 256,
         then by a quarter) and copy."""
@@ -1570,25 +1630,9 @@ class TypedFunctionBuilder:
             IRMove(dst=out_len, src=new_len),
             IRJump(end)
         ]
-        new_cap, grown, is_zero, is_small, quarter = (
-            self.temp(Type.INT), self.temp(), self.temp(Type.BOOL), self.temp(Type.BOOL), self.temp(Type.INT))
-        zero = self.ids.new_label('cap_zero')
-        nonzero = self.ids.new_label('cap_nonzero')
-        small = self.ids.new_label('cap_small')
-        large = self.ids.new_label('cap_large')
-        ready = self.ids.new_label('cap_ready')
-        ir += [
-            IRLabel(grow),
-            IRBinOp(dst=is_zero, op=BinaryOp.EQUAL, left=cap, right=IRConst(0, Type.INT)),
-            IRBranch(cond=is_zero, true_label=zero, false_label=nonzero),
-            IRLabel(zero), IRMove(dst=new_cap, src=IRConst(1, Type.INT)), IRJump(ready),
-            IRLabel(nonzero), IRBinOp(dst=is_small, op=BinaryOp.LESS_THAN, left=cap, right=IRConst(256, Type.INT)),
-            IRBranch(cond=is_small, true_label=small, false_label=large),
-            IRLabel(small), IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=cap), IRJump(ready),
-            IRLabel(large), IRBinOp(dst=quarter, op=BinaryOp.SHIFT_RIGHT, left=cap, right=IRConst(2, Type.INT)),
-            IRBinOp(dst=new_cap, op=BinaryOp.ADD, left=cap, right=quarter), IRJump(ready),
-            IRLabel(ready), IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, new_cap, width]),
-        ]
+        new_cap, grown = self.temp(Type.INT), self.temp()
+        ir += [IRLabel(grow)] + self.grown_capacity(new_cap, cap) + [
+            IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, new_cap, width])]
         ir += write_at(grown) + [
             IRMove(dst=out_ptr, src=grown),
             IRMove(dst=out_cap, src=new_cap),

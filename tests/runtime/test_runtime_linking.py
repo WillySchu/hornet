@@ -74,6 +74,7 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
         names = [
             "hornet_argv_get",
             "hornet_bytes",
+            "hornet_copy_items",
             "hornet_dict_contains_scalar_key",
             "hornet_dict_contains_str_key",
             "hornet_dict_delete_scalar_key",

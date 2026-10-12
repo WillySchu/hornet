@@ -365,8 +365,7 @@ def []Out _space_top_level([]Out r):
         k -= 1
     []Out out
     for k2, u in units:
-        for int i = u.start; i < u.end; i += 1:
-            out = append(out, r[i])
+        out = append(out, r[u.start:u.end]...)
         if k2 + 1 < len(units):
             bool attached = u.comment and not u.blank_after
             if not attached and (wide[k2] or wide[k2 + 1] or u.blank_after):

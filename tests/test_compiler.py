@@ -11965,7 +11965,7 @@ class TestAppend:
             "    []int x = []int[1, 2]\n"
             "    []int y = append(x)\n"
             "    return 0",
-            match="expects exactly 2 arguments",
+            match="'append' needs something to add after the slice",
         )
 
     def test_non_slice_first_argument_is_rejected(self):

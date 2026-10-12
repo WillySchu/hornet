@@ -1010,6 +1010,14 @@ void *hornet_slice_grow(const void *old_ptr, int64_t len, int64_t new_cap, int64
     return new_ptr;
 }
 
+// `count` elements of element_width bytes from `src` to element `at` of `dst`, as if read before any
+// is written: the two may overlap (append(xs[:1], xs...)).
+void hornet_copy_items(void *dst, int64_t at, const void *src, int64_t count, int64_t element_width) {
+    if (count > 0) {
+        memmove((char *)dst + at * element_width, src, (size_t)count * (size_t)element_width);
+    }
+}
+
 // FNV-1a 64 over bytes. Scalar keys hash their value bytes; str keys hash their content.
 int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
     uint64_t h = 0xcbf29ce484222325ULL;  // FNV offset basis

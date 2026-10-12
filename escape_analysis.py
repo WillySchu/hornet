@@ -256,11 +256,13 @@ class EscapeAnalyzer:
             for k, v in e.entries:
                 self._add(loc, self.vals(k) | self.vals(v))
             return {loc}
-        if isinstance(e, t.Append):
+        if isinstance(e, (t.Append, t.AppendAll)):
             loc = _heap(e)
             old = self.vals(e.slice)
             self._add(loc, self._contents(old))
-            self._store(old | {loc}, self.vals(e.value))
+            # The values themselves are copied: only what they point to is held by the result.
+            added = self.vals(e.value) if isinstance(e, t.Append) else self._contents(self.vals(e.values))
+            self._store(old | {loc}, added)
             return old | {loc}
         if isinstance(e, (t.BytesFromStr, t.StrRawPtr, t.StrRawLen, t.StrFromRawParts)):
             # Runtime and intrinsic operations: treated as calls without a summary.
