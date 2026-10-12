@@ -7,8 +7,8 @@ The expressions in them are ExpressionChecker's; nothing there calls back here."
 from typing import Dict, List, Optional
 
 from parser import (
-    Assign, Binary, Break, Continue, Defer, ExprStmt, Field, For, ForIn, Function, If, Index, IsCheck, Match, Node,
-    Return, VarDecl, Variable, While,
+    Assign, Binary, Break, Call, Continue, Defer, ExprStmt, Field, For, ForIn, Function, If, Index, IsCheck, Match,
+    Node, Return, VarDecl, Variable, While,
 )
 from scopes import display_name as shown
 from semantic.context import Context
@@ -154,7 +154,10 @@ class StatementChecker:
         elif isinstance(stmt, Continue):
             self.analyze_continue(stmt)
         elif isinstance(stmt, ExprStmt):
-            self.expressions.check_expr_allowing_struct_literal(stmt.expr)
+            if self.expressions.check_expr_allowing_struct_literal(stmt.expr) not in (Type.VOID, Type.NEVER):
+                raise SemanticError(
+                    f"{self._what_gives(stmt.expr)} gives a value ({self.facts.types[stmt.expr.nid]}) that nothing "
+                    f"uses -- use it, or throw it away with `_ = ...`", stmt.expr)
         else:
             raise SemanticError(f"No semantic rule for statement: {stmt!r}", stmt)
 
@@ -183,9 +186,25 @@ class StatementChecker:
         self.facts.symbols[stmt.nid] = self.symbols.new(stmt.name, 'local', declared_type, stmt)
         self.context.scopes.declare(stmt.name, declared_type, stmt, self.facts.symbols[stmt.nid].id)
 
+    def _what_gives(self, expr: Node) -> str:
+        """Checked `expr` as the subject of a sentence about its value: a call by what it calls."""
+        if self.expressions.calls.struct_literal(expr) is not None:
+            return "This struct literal"
+        if isinstance(expr, Call):
+            return f"This call to {'method ' if expr.receiver is not None else ''}'{expr.name}'"
+        return "This expression"
+
     def analyze_assign(self, stmt: Assign) -> None:
-        """`target = value` or `target op= value`, to a name, field, element, or pointee."""
+        """`target = value` or `target op= value`, to a name, field, element, or pointee; `_ = value`
+        evaluates the value and throws it away."""
         target = stmt.target
+        if isinstance(target, Variable) and target.name == '_':
+            if stmt.op is not None:
+                raise SemanticError(f"`_ {stmt.op.symbol()}= ...` has nothing to work on: `_ = value` only throws a "
+                                    f"value away", stmt)
+            if self.expressions.check_expr_allowing_struct_literal(stmt.value) in (Type.VOID, Type.NEVER):
+                raise SemanticError(f"{self._what_gives(stmt.value)} gives no value to throw away", stmt.value)
+            return
         if isinstance(target, Variable):
             if self.expressions.const_key(target.name) is not None and not self.context.scopes.is_local(target.name):
                 raise SemanticError(f"Cannot assign to constant '{target.name}'", stmt)
@@ -477,7 +496,8 @@ class StatementChecker:
         ]
         self.facts.for_symbols[stmt.nid] = symbols
         for name, binding_type, sym in zip(stmt.binding_names, binding_types, symbols):
-            self.context.scopes.declare(name, binding_type, stmt, sym.id)
+            if name != '_':  # (`for i, _ in xs`: what would be bound is thrown away)
+                self.context.scopes.declare(name, binding_type, stmt, sym.id)
         self.context.scopes.forget_assigned_in(stmt.body)
         self.loop_depth += 1
         self._analyze_block(stmt.body, return_type)

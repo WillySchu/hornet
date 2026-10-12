@@ -179,7 +179,7 @@ type _Parser struct:
     # -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
     def _ValueResult _number(*self):
         int start = self._pos
-        self._take('-')
+        _ = self._take('-')
         if self._take('0'):
             if not self._at_end() and _is_digit(self._src[self._pos]):
                 return self._error('a number can\'t start with 0')
@@ -189,7 +189,7 @@ type _Parser struct:
             return self._error('expected a digit after \'.\'')
         if self._take('e') or self._take('E'):
             if not self._take('+'):
-                self._take('-')
+                _ = self._take('-')
             if not self._digits():
                 return self._error('expected a digit in the exponent')
         return _Parsed(Number(self._src[start:self._pos]))

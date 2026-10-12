@@ -40,7 +40,7 @@ def int main(int argc, *byte argv):
     if r is Error:
         print('error: ' + r.message)
         return 1
-    write_stdout(int_to_str(r.status) + ' ' + r.reason + '\\n' + r.header(args[3]) + '\\n' + r.body)
+    _ = write_stdout(int_to_str(r.status) + ' ' + r.reason + '\\n' + r.header(args[3]) + '\\n' + r.body)
     return 0
 """
 

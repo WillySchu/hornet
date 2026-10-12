@@ -34,19 +34,19 @@ type Compiler struct:
     def _expression(*self, *Expr tree):
         match *tree as node:
             is Num:
-                self._emit(Instruction(Opcode.Push, node.value, '', Op.Add, 0))
+                _ = self._emit(Instruction(Opcode.Push, node.value, '', Op.Add, 0))
             is Name:
-                self._emit(Instruction(Opcode.Load, 0, node.name, Op.Add, node.col))
+                _ = self._emit(Instruction(Opcode.Load, 0, node.name, Op.Add, node.col))
             is Unary:
                 self._expression(node.operand)
-                self._emit(Instruction(Opcode.ApplyUnary, 0, '', node.op, 0))
+                _ = self._emit(Instruction(Opcode.ApplyUnary, 0, '', node.op, 0))
             is Binary:
                 if node.op is And or node.op is Or:
                     self._short_circuit(node)
                 else:
                     self._expression(node.left)
                     self._expression(node.right)
-                    self._emit(Instruction(Opcode.Apply, 0, '', node.op, node.col))
+                    _ = self._emit(Instruction(Opcode.Apply, 0, '', node.op, node.col))
 
     # `a and b`: a; if it is zero the answer is 0, and b never runs; else b's truth. `or` likewise.
     def _short_circuit(*self, Binary node):
@@ -58,10 +58,10 @@ type Compiler struct:
             decided = 1
         int to_decided = self._emit(Instruction(skip, 0, '', node.op, 0))
         self._expression(node.right)
-        self._emit(Instruction(Opcode.Truth, 0, '', node.op, 0))
+        _ = self._emit(Instruction(Opcode.Truth, 0, '', node.op, 0))
         int to_end = self._emit(Instruction(Opcode.Jump, 0, '', node.op, 0))
         self._land(to_decided)
-        self._emit(Instruction(Opcode.Push, decided, '', node.op, 0))
+        _ = self._emit(Instruction(Opcode.Push, decided, '', node.op, 0))
         self._land(to_end)
 
 # The statement's value, then what is done with it: stored in its target, or printed.
@@ -69,7 +69,7 @@ def []Instruction compile(Statement statement):
     Compiler compiler
     compiler._expression(statement.value)
     if statement.target == '':
-        compiler._emit(Instruction(Opcode.Print, 0, '', Op.Add, 0))
+        _ = compiler._emit(Instruction(Opcode.Print, 0, '', Op.Add, 0))
     else:
-        compiler._emit(Instruction(Opcode.Store, 0, statement.target, Op.Add, 0))
+        _ = compiler._emit(Instruction(Opcode.Store, 0, statement.target, Op.Add, 0))
     return compiler._code

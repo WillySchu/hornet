@@ -103,7 +103,7 @@ def _allocations(main_body: str) -> int:
 
 
 def test_packing_allocates_only_what_the_callee_keeps():
-    assert _allocations("    Parser p = Parser(Kind.Int)\n    p.check(Kind.Int, Kind.Str)\n"
+    assert _allocations("    Parser p = Parser(Kind.Int)\n    _ = p.check(Kind.Int, Kind.Str)\n"
                         "    return total(1, 2, 3) + lead('a', 1)\n") == 0
     assert _allocations("    []int kept = same(1, 2)\n    return len(kept)\n") == 1
 

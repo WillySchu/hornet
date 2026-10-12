@@ -85,7 +85,7 @@ def test_compound_assignment_into_an_entry_that_moves():
         "def int fill(dict[int]C d):\n"
         "    for int i = 1; i < 100; i += 1:\n        d[i] = C(i, 'x', [i, i, i], none)\n"
         "    return 5\n"
-        "def str more(dict[int]C d):\n    fill(d)\n    return '-more'\n"
+        "def str more(dict[int]C d):\n    _ = fill(d)\n    return '-more'\n"
         "def int main():\n"
         "    dict[int]C d\n"
         "    d[0] = C(1, 'one', [1, 2, 3], none)\n"

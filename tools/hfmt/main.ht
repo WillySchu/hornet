@@ -56,7 +56,7 @@ def str _with_crlf(str text):
 def str dump_tokens(str path, str src):
     match lex(src) as r:
         is LexError:
-            write_stderr(_located(path, r.line, r.col, r.message) + '\n')
+            _ = write_stderr(_located(path, r.line, r.col, r.message) + '\n')
             exit(1)
         is Tokens:
             Builder b
@@ -85,29 +85,29 @@ def str _source_or_exit(str path):
         is str:
             return v
         is Error:
-            write_stderr('hfmt: ' + v.message + '\n')
+            _ = write_stderr('hfmt: ' + v.message + '\n')
             exit(1)
 
 # Format (or check) one file; false on any error or, when checking, a needed change.
 def bool _process_file(str path, bool check):
     match read_file(path) as src:
         is Error:
-            write_stderr('hfmt: ' + src.message + '\n')
+            _ = write_stderr('hfmt: ' + src.message + '\n')
             return false
         is str:
             match format_source(path, src) as f:
                 is FormatError:
-                    write_stderr(f.message + '\n')
+                    _ = write_stderr(f.message + '\n')
                     return false
                 is str:
                     if f == src:
                         return true
                     if check:
-                        write_stdout(path + '\n')
+                        _ = write_stdout(path + '\n')
                         return false
                     IntResult w = write_file(path, f)
                     if w is Error:
-                        write_stderr('hfmt: ' + w.message + '\n')
+                        _ = write_stderr('hfmt: ' + w.message + '\n')
                         return false
                     return true
     return false
@@ -117,15 +117,15 @@ def bool _process_stdin(bool check):
     str src = _source_or_exit('')
     match format_source('<stdin>', src) as f:
         is FormatError:
-            write_stderr(f.message + '\n')
+            _ = write_stderr(f.message + '\n')
             return false
         is str:
             if check:
                 if f != src:
-                    write_stdout('<stdin>\n')
+                    _ = write_stdout('<stdin>\n')
                     return false
                 return true
-            write_stdout(f)
+            _ = write_stdout(f)
             return true
     return false
 
@@ -144,25 +144,25 @@ def int main(int argc, *byte argv):
             check = true
         elif a == '-':
             if stdin_named:
-                write_stderr(USAGE)
+                _ = write_stderr(USAGE)
                 return 2
             stdin_named = true
             files = append(files, a)
         elif starts_with(a, '-'):
-            write_stderr(USAGE)
+            _ = write_stderr(USAGE)
             return 2
         else:
             files = append(files, a)
     if tokens:
         if check or len(files) > 1:
-            write_stderr(USAGE)
+            _ = write_stderr(USAGE)
             return 2
         str path = ''
         str label = '<stdin>'
         if len(files) == 1 and files[0] != '-':
             path = files[0]
             label = path
-        write_stdout(dump_tokens(label, _source_or_exit(path)))
+        _ = write_stdout(dump_tokens(label, _source_or_exit(path)))
         return 0
     if len(files) == 0:
         files = append(files, '-')

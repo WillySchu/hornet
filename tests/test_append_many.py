@@ -78,7 +78,7 @@ def test_appending_many():
         "    print(str(buf))\n"
         "    []P ps\n"
         "    ps = append(ps, P(1, 'a'), P(2, 'b'))\n    ps = append(ps, ps...)\n    print(ps)\n"
-        "    [][]int kept = rows(9)\n    clobber(100)\n    print(kept)\n"
+        "    [][]int kept = rows(9)\n    _ = clobber(100)\n    print(kept)\n"
         "    []int big\n"
         "    for int i = 0; i < 300; i += 1:\n        big = append(big, i, i)\n"
         "    big = append(big, big[:250]...)\n"

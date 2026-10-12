@@ -42,9 +42,9 @@ type Mode enum:
 # under the column of the line just entered.
 def bool _report(str source, int line, int col, str message):
     if source == '':
-        write_stderr(format('{}^ {}\n', repeat(' ', len(PROMPT) + col - 1), message))
+        _ = write_stderr(format('{}^ {}\n', repeat(' ', len(PROMPT) + col - 1), message))
     else:
-        write_stderr(format('{}:{}:{}: error: {}\n', source, line, col, message))
+        _ = write_stderr(format('{}:{}:{}: error: {}\n', source, line, col, message))
     return false
 
 # A statement's tree as text: after `target = `, if it has one.
@@ -74,13 +74,13 @@ def bool _run(Mode mode, str source, int number, Statement statement, dict[str]i
                 is none:
                     return true
         is Tree:
-            write_stdout(_shown(statement))
+            _ = write_stdout(_shown(statement))
             return true
         is Simplified:
-            write_stdout(_shown(simplified))
+            _ = write_stdout(_shown(simplified))
             return true
         is Code:
-            write_stdout(code_text(compile(simplified)) + '\n')
+            _ = write_stdout(code_text(compile(simplified)) + '\n')
             return true
 
 # One line; false if it has an error.
@@ -101,7 +101,7 @@ def bool run_line(Mode mode, str source, int number, str line, dict[str]int vari
 def int run_file(Mode mode, str path, dict[str]int variables):
     StrResult text = read_file(path)
     if text is Error:
-        write_stderr(format('calc: {}\n', text.message))
+        _ = write_stderr(format('calc: {}\n', text.message))
         return 1
     bool ok = true
     []str lines = split(text, '\n')
@@ -123,18 +123,18 @@ def int run_input(Mode mode, dict[str]int variables):
     int number = 0
     while true:
         if prompting:
-            write_stdout(PROMPT)
+            _ = write_stdout(PROMPT)
         match read_line() as line:
             is str:
                 number += 1
                 if not run_line(mode, source, number, line, variables) and not prompting:
                     ok = false
             is Error:
-                write_stderr(format('calc: {}\n', line.message))
+                _ = write_stderr(format('calc: {}\n', line.message))
                 return 1
             is none:
                 if prompting:
-                    write_stdout('\n')  # the end of input (Ctrl-D) leaves the cursor after the prompt
+                    _ = write_stdout('\n')  # the end of input (Ctrl-D) leaves the cursor after the prompt
                 break
     if ok:
         return 0
@@ -154,7 +154,7 @@ def int main(int argc, *byte argv):
         elif args[i] == '--code':
             mode = Mode.Code
         elif starts_with(args[i], '--') or path != '':
-            write_stderr(USAGE)
+            _ = write_stderr(USAGE)
             return 2
         else:
             path = args[i]

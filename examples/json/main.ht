@@ -16,7 +16,7 @@ from 'json' import parse, to_text, sort_keys, Document, ParseError, Layout, Valu
 const str USAGE = 'usage: jsonfmt [--compact] [--indent N] [--sort-keys] [file]\n'
 
 def int usage():
-    write_stderr(USAGE)
+    _ = write_stderr(USAGE)
     return 2
 
 def int main(int argc, *byte argv):
@@ -50,15 +50,15 @@ def int main(int argc, *byte argv):
         source = path
         text = read_file(path)
     if text is Error:
-        write_stderr(format('jsonfmt: {}\n', text.message))
+        _ = write_stderr(format('jsonfmt: {}\n', text.message))
         return 1
     match parse(text) as result:
         is ParseError:
-            write_stderr(format('{}:{}:{}: error: {}\n', source, result.line, result.col, result.message))
+            _ = write_stderr(format('{}:{}:{}: error: {}\n', source, result.line, result.col, result.message))
             return 1
         is Document:
             Value root = result.root
             if sorting:
                 root = sort_keys(root)
-            write_stdout(to_text(root, layout) + '\n')
+            _ = write_stdout(to_text(root, layout) + '\n')
             return 0

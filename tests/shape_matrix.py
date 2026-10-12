@@ -107,7 +107,7 @@ def contexts(k: str, expr: str):
         ('append', [f"[]{ty} ap"], [f"ap = append(ap, {expr})", "print(ap[0])"], ['{v}']),
         ('dict_value', [f"dict[int]{ty} m = dict[int]{ty}{{}}"], [f"m[0] = {expr}", "print(m[0])"], ['{v}']),
         ('return', [], ["print(ret())"], ['{v}']),
-        ('statement', [], [expr, "print(1)"], ['1']),
+        ('statement', [], [f"_ = {expr}", "print(1)"], ['1']),
     ]
     out = [x for x in out if x is not None]
     if k in 'asd':

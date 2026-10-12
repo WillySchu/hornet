@@ -313,10 +313,12 @@ type Point struct:
 
 ## Type Aliases
 
-`type Name = T` gives an existing type another name; values of the two are interchangeable, but struct literals use the struct's own name:
+`type Name = T` gives any existing type another name; values of the two are interchangeable, but struct literals use the struct's own name:
 
 ```hornet
 type Grid = [3][3]int
+type Ref = *Node
+type Counts = dict[str]int
 ```
 
 ## Pointers
@@ -337,6 +339,8 @@ print(*p)
 ```
 
 Field access through a pointer dereferences automatically. Pointers are single-level; see [Current Limitations](#current-limitations).
+
+A dictionary entry and a narrowed sum's payload have no address, nor do their fields and array elements (what a pointer stored in one points to does): a dictionary moves its entries when it grows, and giving a sum another variant puts that variant where the payload was. So `&d[k].x`, slicing an array in one (`d[k].arr[:]`), and calling a method with a pointer receiver on one are refused; copy the value out, change the copy, and store it back.
 
 ## Sum Types
 
@@ -577,9 +581,9 @@ The last parameter may be variadic, `T... name`, a `[]T` inside the function. A 
 def bool check(Kind at, Kind... kinds):
     return at in kinds
 
-check(k, Kind.Int, Kind.Str)
-check(k)                        # kinds is empty
-check(k, wanted...)             # wanted itself, not a copy
+bool found = check(k, Kind.Int, Kind.Str)
+found = check(k)                # kinds is empty
+found = check(k, wanted...)     # wanted itself, not a copy
 ```
 
 Each argument flows into `T` as into a variable of that type. A spread slice is a `[]T` and is all of the variadic parameter's arguments. Methods may be variadic; an `extern` or intrinsic may not.
@@ -750,7 +754,7 @@ Remove an entry with `del`:
 del(counts, 'green')
 ```
 
-Reading, updating (`counts['green'] += 1`), or deleting a key that isn't there panics, naming the key (`dict lookup: key not found: 'green'`); test with `in` first.
+Reading, updating (`counts['green'] += 1`), or deleting a key that isn't there panics, naming the key (`dict lookup: key not found: 'green'`); test with `in` first. An entry has no address (see [Pointers](#pointers)).
 
 `len` returns the number of live entries.
 
@@ -841,7 +845,9 @@ for word in split(line, ' '):
     print(word)
 ```
 
-Each iteration has its own bindings, so taking a binding's address is allowed. Reallocating the iterated slice (e.g. by `append`), or inserting into the iterated dictionary so that it is rehashed, panics. That watches a slice held in a variable, field, or element; a slice a call returned is iterated as it was returned, whatever is appended meanwhile to the storage it came from.
+A binding written `_` is left unbound: `for i, _ in values`, `for _ in values`.
+
+Each iteration has its own bindings, so taking a binding's address is allowed. An array that is iterated where it is sees changes made during the loop, except one in a dictionary entry or a narrowed sum's payload, which is iterated from a copy. Reallocating the iterated slice (e.g. by `append`), or inserting into the iterated dictionary so that it is rehashed, panics. That watches a slice held in a variable, field, or element; a slice a call returned is iterated as it was returned, whatever is appended meanwhile to the storage it came from.
 
 `break` and `continue` apply to the innermost enclosing loop.
 
@@ -925,7 +931,14 @@ and  or  not
 <<= >>=
 ```
 
-A compound assignment works for any assignable target (a variable, field, element, dictionary entry, or `*p`), including `+=` on a `str`, which appends. It evaluates its target once, reads it, evaluates the value, and then writes.
+A compound assignment works for any assignable target (a variable, field, element, dictionary entry, or `*p`), including `+=` on a `str`, which appends. It evaluates its target once, reads it, evaluates the value, and then writes (to a dictionary entry, or part of one, found again by key if the value may have grown the dictionary).
+
+A value can't be left unused: a statement that is only an expression must give nothing (a call of a function with no result, or one that never returns). `_ = value` evaluates a value and throws it away. `_` is not a name, and can't be declared, except as a `for ... in` binding.
+
+```hornet
+_ = write_stderr('warning\n')      # an IntResult nothing needs
+values = append(values, 3)        # `append(values, 3)` alone is refused
+```
 
 ### Evaluation Order
 
@@ -960,7 +973,7 @@ while node is Cons:
     node = *node.next                   # assigning ends the narrowing
 ```
 
-Assigning to a narrowed variable ends its narrowing, and a loop assumes nothing about a variable its body assigns. A compound assignment (`count += 1`) is no such assignment: it gives the variable back the variant it held, so the narrowing stands. Only variables narrow: `h.shape is Circle` is a plain test. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics.
+Assigning to a narrowed variable ends its narrowing, and a loop assumes nothing about a variable its body assigns. A compound assignment (`count += 1`) is no such assignment: it gives the variable back the variant it held, so the narrowing stands. Only variables narrow: `h.shape is Circle` is a plain test. Nothing narrows to `none`: with only `none` left, the variable keeps its sum type. If a pointer to the variable (`&shape`) changes its variant meanwhile, its next use panics. A narrowed variable's payload has no address (see [Pointers](#pointers)): copy it out (`Circle c = shape`), change the copy, and assign it back.
 
 `T` may be a sum type whose variants are all the subject's: the test is then for any of them. A variable with several variants left keeps its type, but it flows into any sum that has all those it can still hold:
 
@@ -1278,8 +1291,8 @@ LineResult line = read_line()   # the next line of standard input, without its e
 bool at_terminal = is_terminal(0)
 StrResult fd_contents = read_all_from_fd(fd)
 IntResult written = write_file('output.txt', 'hello')
-write_stdout('no trailing newline')
-write_stderr('error\n')
+IntResult out = write_stdout('no trailing newline')
+_ = write_stderr('error\n')     # a failure ignored, explicitly
 exit(0)
 ```
 
@@ -1477,7 +1490,7 @@ def str contents_or_exit(StrResult r):
         is str:
             return v
         is Error:
-            write_stderr(v.message + '\n')
+            _ = write_stderr(v.message + '\n')
             exit(1)
 
 def int count_lines(str s):
@@ -1579,7 +1592,7 @@ Hornet is still experimental. Some notable limitations are:
 * There are no floating-point types yet.
 * There is no TLS: `stdlib/http.ht` makes plain `http://` requests only.
 * Multithreading is not implemented.
-* Without generics, each result type is a separate named sum type. There is no operator for propagating errors, and ignoring a result is not diagnosed.
+* Without generics, each result type is a separate named sum type. There is no operator for propagating errors.
 * The panic for running out of memory has no source position; the one for a stack overflow names only the function.
 
 ---

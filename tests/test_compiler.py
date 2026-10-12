@@ -459,7 +459,7 @@ class TestVariablesAndStatements:
 
     def test_standalone_expression_statement(self):
         assert_exit_code(
-            "    2 + 2\n"
+            "    _ = 2 + 2\n"
             "    return 0",
             0,
         )
@@ -528,14 +528,14 @@ class TestVariablesAndStatements:
 
     def test_standalone_expression_statement_actually_executes(self):
         assert_panics(
-            "    1 / 0\n"
+            "    _ = 1 / 0\n"
             "    return 0",
             "integer division by zero",
         )
 
     def test_standalone_safe_expression_does_not_crash(self):
         assert_exit_code(
-            "    1 + 1\n"
+            "    _ = 1 + 1\n"
             "    return 42",
             42,
         )
@@ -1935,7 +1935,7 @@ class TestFunctions:
             "    return 99\n"
             "\n"
             "def int main():\n"
-            "    side_effect()\n"
+            "    _ = side_effect()\n"
             "    return 42\n",
             42,
         )
@@ -4982,8 +4982,8 @@ class TestSumTypesPrint:
             "    return 0\n"
             "\n"
             "def int main():\n"
-            "    printIt(Circle(1))\n"
-            "    printIt(Square(2))\n"
+            "    _ = printIt(Circle(1))\n"
+            "    _ = printIt(Square(2))\n"
             "    return 0\n",
             "Circle(radius: 1)\nSquare(side: 2)\n",
         )
@@ -4999,7 +4999,7 @@ class TestSumTypesPrint:
             "    return printIt(s)\n"
             "\n"
             "def int main():\n"
-            "    forwardIt(Square(7))\n"
+            "    _ = forwardIt(Square(7))\n"
             "    return 0\n",
             "Square(side: 7)\n",
         )
@@ -5936,7 +5936,7 @@ class TestScalarAndStrVariants:
             "    return 0\n"
             "\n"
             "def int main():\n"
-            "    describe(42)\n"
+            "    _ = describe(42)\n"
             "    return 0\n",
             "42\n",
         )
@@ -6283,7 +6283,7 @@ class TestArraySliceAndPointerVariants:
             "    return 0\n"
             "\n"
             "def int main():\n"
-            "    describe([2]int[4, 5])\n"
+            "    _ = describe([2]int[4, 5])\n"
             "    return 0\n",
             "9\n",
         )
@@ -6344,8 +6344,8 @@ class TestArraySliceAndPointerVariants:
             "\n"
             "def int main():\n"
             "    int y = 33\n"
-            "    readIt(&y)\n"
-            "    readIt(makePtr())\n"
+            "    _ = readIt(&y)\n"
+            "    _ = readIt(makePtr())\n"
             "    return 0\n",
             "33\n55\n",
         )
@@ -10069,7 +10069,7 @@ class TestCastingCodegen:
         assert_program_exit_code(
             "def int main():\n"
             "    int x = 5\n"
-            "    int8(x)\n"
+            "    _ = int8(x)\n"
             "    return 0\n",
             0,
         )
@@ -10980,7 +10980,7 @@ class TestTypedArrayLiterals:
 
     def test_bare_typed_literal_statement(self):
         assert_exit_code(
-            "    [3]int[1, 2, 3]\n"
+            "    _ = [3]int[1, 2, 3]\n"
             "    return 42",
             42,
         )
@@ -10992,7 +10992,7 @@ class TestTypedArrayLiterals:
             "    return 1\n"
             "\n"
             "def int main():\n"
-            "    [2]int[se(), 2]\n"
+            "    _ = [2]int[se(), 2]\n"
             "    return 0\n",
             "99\n",
         )
@@ -11025,7 +11025,7 @@ class TestTypedArrayLiterals:
             "    return 1\n"
             "\n"
             "def int main():\n"
-            "    [2][2]int[[se(), 2], [3, 4]]\n"
+            "    _ = [2][2]int[[se(), 2], [3, 4]]\n"
             "    return 0\n",
             "7\n",
         )
@@ -11066,7 +11066,7 @@ class TestTypedArrayLiterals:
         assert_program_exit_code(
             "def int main():\n"
             "    [3]int arr = [1, 2, 3]\n"
-            "    [1][3]int[arr]\n"
+            "    _ = [1][3]int[arr]\n"
             "    return arr[2]\n",
             3,
         )
@@ -12128,7 +12128,7 @@ class TestAppend:
         assert_program_exit_code(
             "def int main():\n"
             "    []int base = [1, 2]\n"
-            "    append(base, 3)\n"
+            "    _ = append(base, 3)\n"
             "    return len(base)\n",
             2,
         )
@@ -12194,7 +12194,7 @@ class TestBareExpressionStatements:
     def test_bare_none_statement_is_a_no_op(self):
         assert_program_exit_code(
             "def int main():\n"
-            "    none\n"
+            "    _ = none\n"
             "    return 42\n",
             42,
         )
@@ -12205,20 +12205,20 @@ class TestBareExpressionStatements:
             "    return [1, 2, 3]\n"
             "\n"
             "def int main():\n"
-            "    makeArr()\n"
+            "    _ = makeArr()\n"
             "    return 42\n",
             42,
         )
 
     @pytest.mark.parametrize("setup,expr", [
-        ("", "'hello'"),
-        ("", "'a' + 'b'"),
-        ("    []str ss = ['x']\n", "ss[0]"),
-        ("    str t = 'abc'\n", "t[0:2]"),
-        ("    [][]int s2 = [][]int[[]int[1, 2]]\n", "s2[0]"),
-        ("    []P ps = [P(1)]\n", "ps[0]"),
-        ("    dict[int]str d = dict[int]str{1: 'v'}\n", "d[1]"),
-        ("", "str(byte(65))"),
+        ("", "_ = 'hello'"),
+        ("", "_ = 'a' + 'b'"),
+        ("    []str ss = ['x']\n", "_ = ss[0]"),
+        ("    str t = 'abc'\n", "_ = t[0:2]"),
+        ("    [][]int s2 = [][]int[[]int[1, 2]]\n", "_ = s2[0]"),
+        ("    []P ps = [P(1)]\n", "_ = ps[0]"),
+        ("    dict[int]str d = dict[int]str{1: 'v'}\n", "_ = d[1]"),
+        ("", "_ = str(byte(65))"),
     ])
     def test_bare_composite_value_statement(self, setup, expr):
         assert_program_stdout(
@@ -12228,9 +12228,9 @@ class TestBareExpressionStatements:
         )
 
     @pytest.mark.parametrize("setup,expr,message", [
-        ("    []str ss = ['x']\n    int i = 3\n", "ss[i]", "index out of bounds: index 3, length 1"),
-        ("    str t = 'abc'\n    int e = 9\n", "t[0:e]", "slice bounds out of range: end 9, length 3"),
-        ("    dict[int]str d\n", "d[5]", "dict lookup: key not found: 5"),
+        ("    []str ss = ['x']\n    int i = 3\n", "_ = ss[i]", "index out of bounds: index 3, length 1"),
+        ("    str t = 'abc'\n    int e = 9\n", "_ = t[0:e]", "slice bounds out of range: end 9, length 3"),
+        ("    dict[int]str d\n", "_ = d[5]", "dict lookup: key not found: 5"),
     ])
     def test_bare_composite_value_statement_keeps_its_checks(self, setup, expr, message):
         result = compile_and_run(f"def int main():\n{setup}    {expr}\n    print(1)\n    return 0\n")
@@ -12583,7 +12583,7 @@ class TestDictReferenceSemantics:
             "    return d\n"
             "def int main():\n"
             "    dict[int]*int d = f()\n"
-            "    clobber(1)\n"
+            "    _ = clobber(1)\n"
             "    print(*d[0])\n"
             "    return 0\n",
             "41\n")
@@ -12747,7 +12747,7 @@ class TestRecursiveTypes:
             "def int clobber(int a):\n    [64]int big\n    for int i = 0; i < 64; i += 1:\n        big[i] = a + i\n"
             "    return big[63]\n"
             "def Expr make(int a, int b):\n    Expr l = Num(a)\n    Expr r = Num(b)\n    return Bin('*', &l, &r)\n"
-            "def int main():\n    Expr e = make(6, 7)\n    clobber(1)\n    print(eval(&e))\n    return 0\n",
+            "def int main():\n    Expr e = make(6, 7)\n    _ = clobber(1)\n    print(eval(&e))\n    return 0\n",
             "42\n")
 
     def test_a_tree_through_slices(self):
@@ -13760,7 +13760,7 @@ class TestSliceLiterals:
             "    return 1\n"
             "\n"
             "def int main():\n"
-            "    []int[se(), 2, 3]\n"
+            "    _ = []int[se(), 2, 3]\n"
             "    return 0\n",
             "42\n",
         )
@@ -13768,7 +13768,7 @@ class TestSliceLiterals:
     def test_bare_slice_of_existing_array_statement(self):
         assert_exit_code(
             "    [3]int arr = [1, 2, 3]\n"
-            "    arr[:]\n"
+            "    _ = arr[:]\n"
             "    return 0",
             0,
         )
@@ -13776,7 +13776,7 @@ class TestSliceLiterals:
     def test_bare_out_of_range_slice_statement_aborts(self):
         assert_crashes_with_sigabrt(
             "    [3]int arr = [1, 2, 3]\n"
-            "    arr[0:10]\n"
+            "    _ = arr[0:10]\n"
             "    return 0"
         )
 
@@ -16246,7 +16246,7 @@ class TestStructLiterals:
             "    return 1\n"
             "\n"
             "def int main():\n"
-            "    Point(se(), 2)\n"
+            "    _ = Point(se(), 2)\n"
             "    return 0\n",
             "99\n",
         )
@@ -17679,7 +17679,7 @@ class TestArraysOfStructs:
             "    print(v)\n"
             "    return v\n"
             "def int main():\n"
-            "    [2]Point[Point(f(1), 2), Point(3, f(4))]\n"
+            "    _ = [2]Point[Point(f(1), 2), Point(3, f(4))]\n"
             "    return 0\n",
             "1\n4\n",
         )
@@ -19239,7 +19239,7 @@ _ESCAPE_CASES = {
         "def int main():\n"
         "    S v = S([])\n"
         "    fill(&v)\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(v.s)\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),
@@ -19250,7 +19250,7 @@ _ESCAPE_CASES = {
         "def int main():\n"
         "    dict[int][]int d = dict[int][]int{}\n"
         "    put(d)\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(d[0])\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),
@@ -19261,7 +19261,7 @@ _ESCAPE_CASES = {
         "def int main():\n"
         "    [][]int r = [][]int[[]]\n"
         "    put(r)\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r[0])\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),
@@ -19273,7 +19273,7 @@ _ESCAPE_CASES = {
         "    return s\n"
         "def int main():\n"
         "    [][]int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[][]int[[]int[1, 2, 3]]\n"),
@@ -19283,7 +19283,7 @@ _ESCAPE_CASES = {
         "    return [][]int[a[:]]\n"
         "def int main():\n"
         "    [][]int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[][]int[[]int[1, 2, 3]]\n"),
@@ -19294,7 +19294,7 @@ _ESCAPE_CASES = {
         "    return x\n"
         "def int main():\n"
         "    [][]int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[][]int[[]int[1, 2, 3]]\n"),
@@ -19307,7 +19307,7 @@ _ESCAPE_CASES = {
         "    return u\n"
         "def int main():\n"
         "    U r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "C(s: []int[1, 2, 3])\n"),
@@ -19322,7 +19322,7 @@ _ESCAPE_CASES = {
         "    return []\n"
         "def int main():\n"
         "    []int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),
@@ -19337,7 +19337,7 @@ _ESCAPE_CASES = {
         "    return []\n"
         "def int main():\n"
         "    []int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),
@@ -19350,7 +19350,7 @@ _ESCAPE_CASES = {
         "    return v\n"
         "def int main():\n"
         "    S r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "S(s: []int[1, 2, 3])\n"),
@@ -19360,7 +19360,7 @@ _ESCAPE_CASES = {
         "    return dict[int][]int{0: a[:]}\n"
         "def int main():\n"
         "    dict[int][]int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "dict[int][]int{0: []int[1, 2, 3]}\n"),
@@ -19371,7 +19371,7 @@ _ESCAPE_CASES = {
         "def int main():\n"
         "    [1][]int r = [[]]\n"
         "    put(&r)\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[1][]int[[]int[1, 2, 3]]\n"),
@@ -19386,7 +19386,7 @@ _ESCAPE_CASES = {
         "    return out\n"
         "def int main():\n"
         "    [][]int r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[][]int[[]int[1, 2, 3], []int[]]\n"),
@@ -19400,7 +19400,7 @@ _ESCAPE_CASES = {
         "def int main():\n"
         "    S w = S([])\n"
         "    int k = g(&w)\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(w.s)\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),
@@ -19415,7 +19415,7 @@ _ESCAPE_CASES = {
         "    return outer\n"
         "def int main():\n"
         "    N r = f()\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r.next.s)\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n"),

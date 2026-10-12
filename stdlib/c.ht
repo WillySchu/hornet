@@ -5,7 +5,7 @@ intrinsic str _from_raw_parts(*byte p, int n)
 # Memory from the runtime, which panics when there is none: `size` bytes, or `count` items all zero.
 extern *byte hornet_alloc(int size)
 extern *byte hornet_alloc_zeroed(int count, int size)
-extern *byte memcpy(*byte dst, *byte src, int n)
+extern memcpy(*byte dst, *byte src, int n)  # (C returns dst, which nothing here needs)
 extern int strlen(*byte s)
 
 def *byte to_cstring(str s):

@@ -147,7 +147,7 @@ def test_extern_calls_stay_conservative():
         "extern *byte memcpy(*byte dst, *byte src, int n)\n"
         "def int leak():\n"
         "    byte b = \"a\"\n"
-        "    memcpy(&b, &b, 1)\n"
+        "    _ = memcpy(&b, &b, 1)\n"
         "    return 0\n"
     )
     escaping, _ = _escapes(source)
@@ -169,5 +169,6 @@ def test_leaked_local_survives_its_frame(name):
     source, _, _ = LEAKS[name]
     ret, deref = ('*Node', 'r.v') if name == 'e8' else ('*int', '*r')
     assert_program_stdout(
-        source + _NOISE + f"def int main():\n    {ret} r = leak()\n    noise(7)\n    print({deref})\n    return 0\n",
+        source + _NOISE
+        + f"def int main():\n    {ret} r = leak()\n    _ = noise(7)\n    print({deref})\n    return 0\n",
         "42\n")

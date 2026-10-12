@@ -186,7 +186,7 @@ type Parser struct:
     # A `not` (where an operand of its level may start), or an operand.
     def ExprResult _prefix(*self, int level):
         if self._peek().kind is Not and level <= _NOT_LEVEL:
-            self._next()
+            _ = self._next()
             ExprResult operand = self._binary(_NOT_LEVEL)
             if operand is ParseError:
                 return operand

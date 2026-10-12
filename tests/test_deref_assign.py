@@ -93,7 +93,7 @@ def test_deref_assign_through_parameter_survives_return():
         "def int main():\n"
         "    []int r\n"
         "    put(&r)\n"
-        "    noise(9)\n"
+        "    _ = noise(9)\n"
         "    print(r)\n"
         "    return 0\n",
         "[]int[1, 2, 3]\n",

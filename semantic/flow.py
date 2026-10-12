@@ -161,6 +161,8 @@ class Scopes:
     def declare(self, name: str, type_: Type, node: Optional[Node], decl_id) -> None:
         """Declare in the innermost scope; shadowing outer scopes is allowed.
         decl_id is the declaration's Symbol.id."""
+        if name == '_':
+            raise SemanticError("'_' can't be declared: it is kept for throwing a value away, as in `_ = f()`", node)
         if name in self._declared[-1]:
             raise SemanticError(f"Variable '{shown(name)}' is already declared in this scope", node)
         self._declared[-1].add(name)

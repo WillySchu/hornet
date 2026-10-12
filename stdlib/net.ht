@@ -39,7 +39,7 @@ type Conn struct:
         return from_raw_parts(copy, n)
 
     def close(c):
-        hornet_tcp_close(c._socket)
+        _ = hornet_tcp_close(c._socket)
 
 type ConnResult is Conn | Error
 

@@ -81,6 +81,8 @@ class TypedTreeBuilder:
         if isinstance(s, syntax.VarDecl):
             return [self.declare(s)]
         if isinstance(s, syntax.Assign):
+            if isinstance(s.target, syntax.Variable) and s.target.name == '_':  # thrown away
+                return [typed.ExprStmt(self.expr(s.value))]
             if isinstance(s.target, syntax.Variable) and s.op is None:
                 # `v = value` replaces the whole of v, whatever an `is` check has narrowed it to.
                 symbol = self.symbols[self.facts.decls[s.target.nid]]

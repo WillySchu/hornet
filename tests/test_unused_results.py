@@ -19,12 +19,12 @@ SETUP = (
 
 @GCC_SKIP
 @pytest.mark.parametrize("statement,message", [
-    ("10 / zero", "integer division by zero"),
-    ("10 % zero", "integer division by zero"),
+    ("_ = 10 / zero", "integer division by zero"),
+    ("_ = 10 % zero", "integer division by zero"),
     ("int unused = 10 / zero", "integer division by zero"),
     ("int unused = xs[five]", "index out of bounds: index 5, length 3"),
-    ("xs[five]", "index out of bounds: index 5, length 3"),
-    ("*p", "dereference of none"),
+    ("_ = xs[five]", "index out of bounds: index 5, length 3"),
+    ("_ = *p", "dereference of none"),
     ("int unused = *p", "dereference of none"),
 ])
 def test_an_unused_result_still_panics(statement, message):
@@ -36,7 +36,7 @@ def test_unused_results_change_nothing_else():
     assert_stdout(
         SETUP +
         "    int unused = xs[1] / five\n"
-        "    xs[2] % five\n"
+        "    _ = xs[2] % five\n"
         "    print(xs)\n"
         "    return 0",
         "[]int[1, 2, 3]\n",
