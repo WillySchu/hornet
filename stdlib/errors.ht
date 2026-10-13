@@ -4,6 +4,7 @@ type Error struct:
 
 type StrResult is str | Error
 type IntResult is int | Error
+type NoneResult is none | Error  # for what succeeds with nothing to give
 
 # The value, or panic with the error's message.
 def str must_str(StrResult r):

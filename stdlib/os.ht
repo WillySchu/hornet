@@ -1,6 +1,6 @@
 from 'c' import from_cstring, to_cstring, from_raw_parts, hornet_alloc
 from 'strings' import Builder
-from 'errors' import Error, StrResult, IntResult
+from 'errors' import Error, StrResult, IntResult, NoneResult
 
 # argv -> []str. hornet_argv_get does the C-side indexing.
 extern *byte hornet_argv_get(*byte argv, int index)
@@ -21,6 +21,14 @@ extern int hornet_write_fd(int fd, *byte buf, int n)
 extern int hornet_open_write(*byte path)
 extern never hornet_exit(int code)
 extern *byte hornet_error_message()
+extern *byte hornet_get_env(*byte name)
+extern int hornet_process_id()
+extern *byte hornet_make_temp_dir()
+extern int hornet_make_dirs(*byte path)
+extern int hornet_path_exists(*byte path)
+extern int hornet_rename(*byte old_path, *byte new_path)
+extern int hornet_remove(*byte path)
+extern *byte hornet_system_error()
 intrinsic *byte _raw_ptr(str s)
 intrinsic int _raw_len(str s)
 
@@ -96,3 +104,48 @@ def IntResult write_file(str path, str content):
 # Flush pending output and exit with `code`.
 def never exit(int code):
     hornet_exit(code)
+
+# The value of environment variable `name`, or none if it isn't set.
+type EnvValue is str | none
+
+def EnvValue get_env(str name):
+    *byte value = hornet_get_env(to_cstring(name))
+    if value == none:
+        return none
+    return from_cstring(value)
+
+# This process's id.
+def int process_id():
+    return hornet_process_id()
+
+def str _system_reason():
+    return from_cstring(hornet_system_error())
+
+# A new, empty directory in the system's temporary directory: its path.
+def StrResult make_temp_dir():
+    *byte path = hornet_make_temp_dir()
+    if path == none:
+        return Error('could not make a temporary directory: ' + _system_reason())
+    return from_cstring(path)
+
+# Make directory `path`, and the directories it is in, where they don't exist yet.
+def NoneResult make_dirs(str path):
+    if hornet_make_dirs(to_cstring(path)) != 0:
+        return Error('could not make directory \'' + path + '\': ' + _system_reason())
+    return none
+
+# Whether there is a file or directory at `path`.
+def bool exists(str path):
+    return hornet_path_exists(to_cstring(path)) != 0
+
+# Rename (move) `old_path` to `new_path`, replacing a file already there.
+def NoneResult rename(str old_path, str new_path):
+    if hornet_rename(to_cstring(old_path), to_cstring(new_path)) != 0:
+        return Error('could not rename \'' + old_path + '\' to \'' + new_path + '\': ' + _system_reason())
+    return none
+
+# Remove the file, or the empty directory, at `path`.
+def NoneResult remove(str path):
+    if hornet_remove(to_cstring(path)) != 0:
+        return Error('could not remove \'' + path + '\': ' + _system_reason())
+    return none

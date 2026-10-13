@@ -31,8 +31,10 @@ __attribute__((constructor)) static void hornet_binary_standard_streams(void) {
 #else
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #define HORNET_O_BINARY 0
 #endif
 
@@ -902,6 +904,350 @@ int64_t hornet_tcp_close(int64_t sock) {
 void hornet_exit(int64_t code) {
     fflush(NULL);
     exit((int)code);
+}
+
+// ---- Other programs, and the file system, for stdlib/process.ht and stdlib/os.ht.
+//
+// The calls differ between POSIX and Windows, and so do their errors: errno there, GetLastError()
+// here. hornet_system_error says why the most recent of these calls failed, either way.
+
+static char hornet_system_error_text[200] = "";
+
+const char *hornet_system_error(void) {
+    return hornet_system_error_text;
+}
+
+#ifdef _WIN32
+static void hornet_system_failed_with(DWORD code) {
+    char *text = hornet_system_error_text;
+    DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0, text,
+                             sizeof hornet_system_error_text, NULL);
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r' || text[n - 1] == '.' || text[n - 1] == ' ')) {
+        text[--n] = '\0';
+    }
+    if (n == 0) {
+        snprintf(text, sizeof hornet_system_error_text, "Windows error %lu", (unsigned long)code);
+    }
+}
+
+static void hornet_system_failed(void) {
+    hornet_system_failed_with(GetLastError());
+}
+#else
+static void hornet_system_failed_with(int code) {
+    snprintf(hornet_system_error_text, sizeof hornet_system_error_text, "%s", strerror(code));
+}
+
+static void hornet_system_failed(void) {
+    hornet_system_failed_with(errno);
+}
+#endif
+
+#ifdef _WIN32
+// `arg` as one argument of a command line, as Windows programs' C runtimes split one: quoted if it
+// has a space, a tab, or a quote (or is empty), a quote escaped by a backslash, and the backslashes
+// before a quote, or before the closing one, doubled.
+static void hornet_quote_argument(struct hornet_buf *line, const char *arg) {
+    if (*arg != '\0' && strpbrk(arg, " \t\"") == NULL) {
+        hornet_buf_append_cstr(line, arg);
+        return;
+    }
+    hornet_buf_append_byte(line, '"');
+    for (const char *p = arg;; p++) {
+        int64_t backslashes = 0;
+        while (*p == '\\') {
+            backslashes++;
+            p++;
+        }
+        int64_t doubled = *p == '"' || *p == '\0' ? backslashes * 2 : backslashes;
+        for (int64_t i = 0; i < doubled; i++) {
+            hornet_buf_append_byte(line, '\\');
+        }
+        if (*p == '\0') {
+            break;
+        }
+        if (*p == '"') {
+            hornet_buf_append_byte(line, '\\');
+        }
+        hornet_buf_append_byte(line, *p);
+    }
+    hornet_buf_append_byte(line, '"');
+}
+
+// A new file in the temporary directory, removed when the last handle to it is closed; one the
+// child inherits.
+static HANDLE hornet_temporary_file(void) {
+    char dir[MAX_PATH + 1], path[MAX_PATH + 1];
+    SECURITY_ATTRIBUTES inherited = {sizeof inherited, NULL, TRUE};
+    if (GetTempPathA(sizeof dir, dir) == 0 || GetTempFileNameA(dir, "hor", 0, path) == 0) {
+        return INVALID_HANDLE_VALUE;
+    }
+    return CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       &inherited, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+}
+#else
+// A new file in $TMPDIR (or /tmp), already unlinked: it goes when its descriptors do. -1 on failure.
+static int hornet_temporary_file(void) {
+    const char *dir = getenv("TMPDIR");
+    char path[4096];
+    snprintf(path, sizeof path, "%s/hornet-XXXXXX", dir != NULL && *dir != '\0' ? dir : "/tmp");
+    int fd = mkstemp(path);
+    if (fd >= 0) {
+        unlink(path);
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+    return fd;
+}
+#endif
+
+// Run the program `args` names (found on PATH unless it has a directory), with `count` arguments
+// one after another in `args`, each ending in a zero byte (the first is the program); wait for it.
+// Its input is empty, and what it writes to its standard output and error goes to files, read from
+// the start through *out_fd and *err_fd: the caller reads and closes them. The exit code, with
+// *signal 0, or the signal that ended it (POSIX) in *signal; -1 if it couldn't be started.
+int64_t hornet_process_run(const char *args, int64_t count, int64_t *out_fd, int64_t *err_fd, int64_t *signal) {
+    *signal = 0;
+    *out_fd = *err_fd = -1;
+#ifdef _WIN32
+    struct hornet_buf line = {0};
+    const char *arg = args;
+    for (int64_t i = 0; i < count; i++) {
+        if (i > 0) {
+            hornet_buf_append_byte(&line, ' ');
+        }
+        hornet_quote_argument(&line, arg);
+        arg += strlen(arg) + 1;
+    }
+    hornet_buf_append_byte(&line, '\0');
+    SECURITY_ATTRIBUTES inherited = {sizeof inherited, NULL, TRUE};
+    HANDLE out = hornet_temporary_file(), err = hornet_temporary_file();
+    HANDLE in = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &inherited, OPEN_EXISTING, 0,
+                            NULL);
+    if (out == INVALID_HANDLE_VALUE || err == INVALID_HANDLE_VALUE || in == INVALID_HANDLE_VALUE) {
+        hornet_system_failed();
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+        if (err != INVALID_HANDLE_VALUE) CloseHandle(err);
+        if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
+        return -1;
+    }
+    STARTUPINFOA startup = {0};
+    startup.cb = sizeof startup;
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = in;
+    startup.hStdOutput = out;
+    startup.hStdError = err;
+    PROCESS_INFORMATION process;
+    BOOL started = CreateProcessA(NULL, line.ptr, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process);
+    if (!started) {
+        hornet_system_failed();
+    }
+    CloseHandle(in);
+    if (!started) {
+        CloseHandle(out);
+        CloseHandle(err);
+        return -1;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(process.hProcess, &code);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    SetFilePointer(out, 0, NULL, FILE_BEGIN);
+    SetFilePointer(err, 0, NULL, FILE_BEGIN);
+    *out_fd = _open_osfhandle((intptr_t)out, _O_RDONLY | _O_BINARY);
+    *err_fd = _open_osfhandle((intptr_t)err, _O_RDONLY | _O_BINARY);
+    return (int64_t)code;
+#else
+    char **argv = hornet_alloc((count + 1) * (int64_t)sizeof(char *));
+    const char *arg = args;
+    for (int64_t i = 0; i < count; i++) {
+        argv[i] = (char *)arg;
+        arg += strlen(arg) + 1;
+    }
+    argv[count] = NULL;
+    int out = hornet_temporary_file(), err = hornet_temporary_file(), in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    // The child reports an exec that failed down this pipe; one that worked closes it (O_CLOEXEC).
+    int report[2] = {-1, -1};
+    if (out < 0 || err < 0 || in < 0 || pipe(report) != 0) {
+        hornet_system_failed();
+        goto failed;
+    }
+    fcntl(report[0], F_SETFD, FD_CLOEXEC);
+    fcntl(report[1], F_SETFD, FD_CLOEXEC);
+    fflush(NULL);  // (what is buffered would otherwise be written twice, once by each process)
+    pid_t pid = fork();
+    if (pid < 0) {
+        hornet_system_failed();
+        goto failed;
+    }
+    if (pid == 0) {
+        if (dup2(in, 0) >= 0 && dup2(out, 1) >= 0 && dup2(err, 2) >= 0) {
+            execvp(argv[0], argv);
+        }
+        int why = errno;
+        ssize_t written = write(report[1], &why, sizeof why);
+        (void)written;
+        _exit(127);
+    }
+    close(report[1]);
+    report[1] = -1;
+    int why;
+    ssize_t got;
+    do {
+        got = read(report[0], &why, sizeof why);
+    } while (got < 0 && errno == EINTR);
+    int status;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+    if (got == (ssize_t)sizeof why) {
+        hornet_system_failed_with(why);
+        goto failed;
+    }
+    close(report[0]);
+    close(in);
+    lseek(out, 0, SEEK_SET);
+    lseek(err, 0, SEEK_SET);
+    *out_fd = out;
+    *err_fd = err;
+    if (WIFSIGNALED(status)) {
+        *signal = WTERMSIG(status);
+        return 0;
+    }
+    return WEXITSTATUS(status);
+failed:
+    if (out >= 0) close(out);
+    if (err >= 0) close(err);
+    if (in >= 0) close(in);
+    if (report[0] >= 0) close(report[0]);
+    if (report[1] >= 0) close(report[1]);
+    return -1;
+#endif
+}
+
+// getenv: NULL when `name` isn't set.
+const char *hornet_get_env(const char *name) {
+    return getenv(name);
+}
+
+int64_t hornet_process_id(void) {
+#ifdef _WIN32
+    return (int64_t)GetCurrentProcessId();
+#else
+    return (int64_t)getpid();
+#endif
+}
+
+// A new directory in the temporary directory, its path in memory the caller keeps; NULL on failure.
+char *hornet_make_temp_dir(void) {
+#ifdef _WIN32
+    char dir[MAX_PATH + 1];
+    if (GetTempPathA(sizeof dir, dir) == 0) {
+        hornet_system_failed();
+        return NULL;
+    }
+    char *path = hornet_alloc(MAX_PATH + 64);
+    for (unsigned attempt = 0; attempt < 1000; attempt++) {
+        snprintf(path, MAX_PATH + 64, "%shornet-%lu-%lu-%u", dir, (unsigned long)GetCurrentProcessId(),
+                 (unsigned long)GetTickCount(), attempt);
+        if (CreateDirectoryA(path, NULL)) {
+            return path;
+        }
+        if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            break;
+        }
+    }
+    hornet_system_failed();
+    return NULL;
+#else
+    const char *dir = getenv("TMPDIR");
+    char *path = hornet_alloc(4096);
+    snprintf(path, 4096, "%s/hornet-XXXXXX", dir != NULL && *dir != '\0' ? dir : "/tmp");
+    if (mkdtemp(path) == NULL) {
+        hornet_system_failed();
+        return NULL;
+    }
+    return path;
+#endif
+}
+
+static int hornet_is_directory(const char *path) {
+#ifdef _WIN32
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat info;
+    return stat(path, &info) == 0 && S_ISDIR(info.st_mode);
+#endif
+}
+
+// Make the directory `path`, and those it is in, as needed: 0, or -1 (with what is made kept).
+int64_t hornet_make_dirs(const char *path) {
+    size_t n = strlen(path);
+    char *partial = hornet_alloc((int64_t)n + 1);
+    memcpy(partial, path, n + 1);
+    for (size_t i = 1; i <= n; i++) {
+        if (i < n && partial[i] != '/' && partial[i] != '\\') {
+            continue;
+        }
+        char kept = partial[i];
+        partial[i] = '\0';
+        int made;
+#ifdef _WIN32
+        made = (i == 2 && partial[1] == ':') || CreateDirectoryA(partial, NULL)  // (`C:` is no directory to make)
+               || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+        made = mkdir(partial, 0777) == 0 || errno == EEXIST;
+#endif
+        if (!made || !hornet_is_directory(partial)) {
+            if (made) {  // (it exists, but is something else)
+#ifdef _WIN32
+                hornet_system_failed_with(ERROR_DIRECTORY);
+#else
+                hornet_system_failed_with(ENOTDIR);
+#endif
+            } else {
+                hornet_system_failed();
+            }
+            return -1;
+        }
+        partial[i] = kept;
+    }
+    return 0;
+}
+
+int64_t hornet_path_exists(const char *path) {
+#ifdef _WIN32
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat info;
+    return stat(path, &info) == 0;
+#endif
+}
+
+// Rename `from` to `to`, replacing what `to` was: 0, or -1.
+int64_t hornet_rename(const char *from, const char *to) {
+#ifdef _WIN32
+    if (!MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+#else
+    if (rename(from, to) != 0) {
+#endif
+        hornet_system_failed();
+        return -1;
+    }
+    return 0;
+}
+
+// Remove the file, or the empty directory, `path`: 0, or -1.
+int64_t hornet_remove(const char *path) {
+#ifdef _WIN32
+    if (!(hornet_is_directory(path) ? RemoveDirectoryA(path) : DeleteFileA(path))) {
+#else
+    if (remove(path) != 0) {
+#endif
+        hornet_system_failed();
+        return -1;
+    }
+    return 0;
 }
 
 // format(...): the compiled code keeps a hornet_buf in its frame, begins it, and has each piece

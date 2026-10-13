@@ -1,0 +1,51 @@
+# Running other programs.
+from 'c' import from_cstring
+from 'errors' import Error, StrResult
+from 'os' import hornet_close_fd, hornet_system_error, read_all_from_fd
+from 'strings' import Builder, index_of_byte
+
+extern int hornet_process_run(*byte args, int count, *int out_fd, *int err_fd, *int signal)
+intrinsic *byte _raw_ptr(str s)
+
+# How a program ended, and what it wrote.
+type Finished struct:
+    int code  # its exit code, when no signal ended it
+    int signal  # POSIX: the signal that ended it, or 0; always 0 on Windows
+    str out  # all it wrote to its standard output
+    str err  # and to its standard error
+
+    # Whether it exited with code 0.
+    def bool ok(f):
+        return f.signal == 0 and f.code == 0
+
+# A program that ran, or an Error if it couldn't be started.
+type RunResult is Finished | Error
+
+# Run the program `args[0]` (found on the PATH unless it names a directory) with the rest of `args`
+# as its arguments, no shell between, and wait for it to finish. Its input is empty; what it writes
+# is kept.
+def RunResult run([]str args):
+    if len(args) == 0:
+        return Error('run: no program given')
+    Builder packed
+    for arg in args:
+        if index_of_byte(arg, "\0") >= 0:
+            return Error('run: an argument can\'t hold a zero byte')
+        packed.write(arg)
+        packed.write_byte("\0")
+    str all = packed.to_str()
+    int out_fd = -1
+    int err_fd = -1
+    int signal = 0
+    int code = hornet_process_run(_raw_ptr(all), len(args), &out_fd, &err_fd, &signal)
+    if out_fd < 0:
+        return Error('could not run \'' + args[0] + '\': ' + from_cstring(hornet_system_error()))
+    StrResult out = read_all_from_fd(out_fd)
+    StrResult err = read_all_from_fd(err_fd)
+    _ = hornet_close_fd(out_fd)
+    _ = hornet_close_fd(err_fd)
+    if out is Error:
+        return Error('could not read what \'' + args[0] + '\' wrote: ' + out.message)
+    if err is Error:
+        return Error('could not read what \'' + args[0] + '\' wrote: ' + err.message)
+    return Finished(code, signal, out, err)
