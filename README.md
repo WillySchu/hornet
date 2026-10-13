@@ -39,7 +39,7 @@ python3 build.py program.ht -o program
 ./program
 ```
 
-`build.py` compiles the Hornet source, compiles the bundled native runtime, and links the two together into an executable. The compiled runtime is cached per target under `$HORNET_CACHE_DIR` (default `~/.cache/hornet`).
+`build.py` compiles the Hornet source, compiles the bundled native runtime, and links the two together into an executable. The runtime is compiled with `build.py`'s `RUNTIME_CFLAGS` (`-O2 -std=c11 -fno-strict-aliasing -fwrapv`; the runtime's tests use them too) and cached per target under `$HORNET_CACHE_DIR` (default `~/.cache/hornet`).
 
 The target is written `arch-os`: `x86_64-linux`, `x86_64-macos`, `x86_64-windows`, `aarch64-linux`, or `aarch64-macos`.
 
@@ -63,7 +63,7 @@ Without `-o`, assembly is written to standard output:
 python3 compile.py program.ht
 ```
 
-A generated program that uses runtime functions such as `print` must also be linked with `runtime/runtime.c`. `build.py` handles this automatically.
+A generated program that uses runtime functions such as `print` must also be linked with the runtime (`runtime/`). `build.py` handles this automatically.
 
 `--dump STAGE` prints what a stage of the compiler produces instead of assembly: `tokens`, `tree` (the parser's), `typed` (the typed tree; see [Compiler Architecture](#compiler-architecture)), `ir`, or `optimized-ir`. A dump runs the compiler only as far as its stage, so `--dump tokens` works on a file that doesn't parse. `tokens` and `tree` are of the file named; the others are of the whole program (`typed` shows every function, and the IR dumps those that are compiled).
 
@@ -1181,7 +1181,7 @@ extern free(*byte p)
 
 An omitted return type means the function returns no value.
 
-The current FFI restricts `extern` parameters and return values to scalar and pointer types. Hornet arrays, slices, structs, sum types, and strings do not currently have a general direct FFI representation.
+The current FFI restricts `extern` parameters and return values to scalar and pointer types. Hornet arrays, slices, structs, sum types, and strings do not currently have a general direct FFI representation. Storage is laid out as C lays out the same fields, aligned, so a struct is the C struct with those fields and can be passed by pointer; a sum is a 4-byte tag with its payload at offset 8.
 
 Hornet's `int` is 64-bit; declare C `int` parameters and results as `int32` (for example `extern int32 close(int32 fd)`). `long`, `size_t`, and `ssize_t` are `int` (except on Windows, where C's `long` is 32-bit: `int32`).
 
@@ -1215,7 +1215,7 @@ Low-level C interoperability helpers, including:
 raw string access
 C-string conversion
 raw byte/string construction
-memory from the runtime (hornet_alloc, hornet_alloc_zeroed)
+memory from the runtime (hornet_alloc, hornet_alloc_zeroed, and their _atomic versions)
 ```
 
 ## `stdlib/hash.ht`
@@ -1332,7 +1332,7 @@ There is no TLS yet, so an `https://` URL is an `Error`. Redirects are the calle
 
 # Runtime
 
-The native runtime is located in `runtime/runtime.c` and is compiled separately from the generated Hornet assembly.
+The native runtime is the C in `runtime/`, a file per area (`dict.c`, `format.c`, `memory.c`, ...; `_posix.c` and `_windows.c` versions where the systems differ), sharing `internal.h`. It is compiled separately from the generated Hornet assembly, into `start.c`'s object and an archive of the rest, from which the linker takes only what a program uses.
 
 It currently provides language-level services including:
 
@@ -1340,9 +1340,9 @@ It currently provides language-level services including:
 * the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
 * catching a stack overflow, to report it as a panic that names the function
 * TCP sockets for `stdlib/net.ht` (`hornet_tcp_connect`, `hornet_tcp_read`, `hornet_tcp_write`, `hornet_tcp_close`, and `hornet_net_error` for why one failed), since C's sockets differ between systems; on Windows the program is linked with `ws2_32`
-* memory: `hornet_alloc` and `hornet_alloc_zeroed`, which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
+* memory: `hornet_alloc` and `hornet_alloc_zeroed`, and their `_atomic` versions for memory that holds no pointer (so that a collector need not look through it), which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
 * `format`'s buffer (`hornet_format_begin`, `hornet_format_text`, `hornet_format_value`)
-* `hornet_slice_grow`, which copies a slice into a larger backing store
+* `hornet_slice_grow` (and `_atomic`), which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
 * dictionary hash tables, hashed with FNV-1a (`hornet_hash_bytes`)
 * runtime type descriptors (`hornet_typedesc_tags.h` is generated from `ir/typedesc.py` by `runtime/generate_typedesc_header.py`)

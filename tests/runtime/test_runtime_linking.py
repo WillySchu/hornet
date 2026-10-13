@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from build import c_compiler, executable_name, link_flags, runtime_objects, runtime_sources
+from build import RUNTIME_CFLAGS, c_compiler, executable_name, link_flags, runtime_objects, runtime_sources
 from tests.targets import each_runnable_target, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
@@ -46,7 +46,8 @@ def test_runtime_and_caller_link_and_run_correctly(target):
 def test_each_runtime_file_compiles_without_a_warning(target):
     for source in runtime_sources(target):
         result = subprocess.run(
-            [*c_compiler(target), "-c", "-Wall", "-Wextra", "-Wpedantic", "-std=c11", str(source), "-o", os.devnull],
+            [*c_compiler(target), *RUNTIME_CFLAGS, "-c", "-Wall", "-Wextra", "-Wpedantic", str(source), "-o",
+             os.devnull],
             capture_output=True, text=True)
         assert (result.returncode, result.stderr) == (0, ""), source.name
 

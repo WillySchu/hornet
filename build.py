@@ -122,12 +122,18 @@ def runtime_sources(target: Target) -> list[Path]:
     return [RUNTIME_DIR / name for name in RUNTIME_FILES if not name.endswith(left_out)]
 
 
+# How the runtime's C is compiled, wherever it is (the tests build it the same way): optimized, as C11,
+# with memory read as whatever type it is wanted as (the compiled code writes much of what the runtime
+# reads), and signed arithmetic wrapping, as Hornet's does.
+RUNTIME_CFLAGS = ["-O2", "-std=c11", "-fno-strict-aliasing", "-fwrapv"]
+
+
 def runtime_objects(target: Target) -> list[Path]:
     """The runtime built for `target`, as what a program links with it: start.c's object, then an
     archive of the rest, from which the linker takes only what the program uses. Built once and
     reused: the names carry a hash of the runtime's sources and the commands, so any change builds
     them anew. Written atomically, so concurrent builds can share them."""
-    command = c_compiler(target) + ["-c"]
+    command = c_compiler(target) + RUNTIME_CFLAGS + ["-c"]
     digest = hashlib.sha256(" ".join(command + [archiver(target)]).encode())
     sources = runtime_sources(target)
     for path in [*sources, *sorted(RUNTIME_DIR.glob("*.h"))]:

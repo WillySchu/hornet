@@ -17,7 +17,7 @@ int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
 
 // Insert into `buckets`, a table of `capacity` laid out as `dict` says, with room: 0 if it overwrote
 // the key, 1 if the key is new, 2 if new in a tombstone's bucket. (The probe loops keep the layout
-// in locals: the runtime is built without optimization, and these are the hot path.)
+// in locals: these are the hot path.)
 static int64_t dict_insert_scalar(void *buckets, int64_t capacity, const struct hornet_dict *dict,
                                   const void *key_ptr, int64_t key_width, const void *value_ptr, int64_t value_width) {
     int64_t stride = dict->stride, key_offset = dict->key_offset, value_offset = dict->value_offset;
@@ -210,8 +210,8 @@ void hornet_panic_missing_key(const char *msg, const unsigned char *key_desc) {
     abort();
 }
 
-// The bucket holding the key, or NULL. (The probe loops keep the layout in locals: the runtime is
-// built without optimization, and these are the hot path.)
+// The bucket holding the key, or NULL. (The probe loops keep the layout in locals: these are the hot
+// path.)
 static unsigned char *dict_find_scalar(const struct hornet_dict *dict, int64_t key_width, const void *key_ptr) {
     int64_t capacity = dict->capacity;
     if (capacity == 0) {
