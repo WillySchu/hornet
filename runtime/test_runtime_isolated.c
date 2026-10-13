@@ -438,6 +438,169 @@ static void test_heap_grows_a_str_s_bytes_keeping_them(void) {
     CHECK(hornet__heap_find((uintptr_t)grown + 99999, &found) && found.start == grown && !found.holds_pointers);
 }
 
+// ---- The collector. An address a test checks later is kept as its complement, which doesn't look
+// like a pointer, so that keeping it doesn't keep the object; garbage is made in functions of its
+// own, whose frames are gone (and below the stack scanned) by the time the collector runs.
+
+struct node {
+    struct node *next;
+    int64_t value;
+};
+
+// That garbage was freed: not checked under the address sanitizer, whose stack frames keep words of
+// earlier frames that no clearing reaches, and that the collector, being conservative, can't tell
+// from pointers. (What it checks there is the other half: that nothing kept was freed.)
+#if defined(__SANITIZE_ADDRESS__)
+#define HORNET_UNDER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define HORNET_UNDER_ASAN 1
+#endif
+#endif
+#ifdef HORNET_UNDER_ASAN
+#define CHECK_FREED(condition) ((void)0)
+#else
+#define CHECK_FREED(condition) CHECK(condition)
+#endif
+
+static int alive(uintptr_t complement) {
+    struct hornet_heap_object found;
+    return hornet__heap_find(~complement, &found);
+}
+
+// Zero the stack below here, where the frames of the functions that made the garbage were: the
+// collector's own frames go there, and may leave some of it as it was, for it to read. (In a program
+// that keeps an object a while longer; in a test, it would be a failure.)
+__attribute__((noinline)) static void clear_stack(void) {
+    volatile char below[64 * 1024];
+    for (size_t i = 0; i < sizeof below; i++) {  // (a memset of it, never read, could be left out)
+        below[i] = 0;
+    }
+}
+
+static void collect(void) {
+    clear_stack();
+    hornet__gc_collect();
+}
+
+__attribute__((noinline)) static uintptr_t make_garbage_list(int count) {
+    struct node *head = NULL;
+    for (int i = 0; i < count; i++) {
+        struct node *node = hornet__heap_alloc(sizeof *node, 1, 0);
+        node->next = head;
+        node->value = i;
+        head = node;
+    }
+    return ~(uintptr_t)head;
+}
+
+__attribute__((noinline)) static struct node *make_list(int count) {
+    struct node *head = NULL;
+    for (int i = 0; i < count; i++) {
+        struct node *node = hornet__heap_alloc(sizeof *node, 1, 0);
+        node->next = head;
+        node->value = i;
+        head = node;
+    }
+    return head;
+}
+
+static void test_gc_keeps_what_the_stack_reaches_and_frees_the_rest(void) {
+    struct node *volatile kept = make_list(10000);
+    uintptr_t dropped = make_garbage_list(10000);
+    struct hornet_heap_stats before, after;
+    hornet__heap_stats(&before);
+    collect();
+    hornet__heap_stats(&after);
+    CHECK(after.collections == before.collections + 1);
+    CHECK_FREED(!alive(dropped));
+    CHECK_FREED(after.freed_bytes - before.freed_bytes >= 9990 * 16);
+    int64_t expected = 9999, intact = 1;
+    for (struct node *node = kept; node != NULL; node = node->next) {
+        intact &= node->value == expected--;
+    }
+    CHECK(intact && expected == -1);
+}
+
+__attribute__((noinline)) static uintptr_t hide_in_atomic(char **atomic) {
+    struct node *node = hornet__heap_alloc(sizeof *node, 1, 0);
+    *atomic = hornet__heap_alloc(sizeof node, 0, 0);
+    memcpy(*atomic, &node, sizeof node);  // the only pointer to it, where the collector doesn't look
+    return ~(uintptr_t)node;
+}
+
+static void test_gc_doesnt_look_through_what_holds_no_pointers(void) {
+    char *volatile atomic;
+    uintptr_t node = hide_in_atomic((char **)&atomic);
+    collect();
+    CHECK(alive(~(uintptr_t)atomic));
+    CHECK_FREED(!alive(node));
+}
+
+__attribute__((noinline)) static char *middle_of_new(int64_t size, uintptr_t *start) {
+    char *object = hornet__heap_alloc(size, 0, 1);
+    *start = ~(uintptr_t)object;
+    object[size / 2] = 42;
+    return object + size / 2;
+}
+
+static void test_gc_keeps_an_object_pointed_to_inside(void) {
+    uintptr_t small_start, large_start;
+    char *volatile small = middle_of_new(1000, &small_start);
+    char *volatile large = middle_of_new(200000, &large_start);
+    collect();
+    CHECK(alive(small_start) && alive(large_start));
+    CHECK(*small == 42 && *large == 42);
+}
+
+__attribute__((noinline)) static uintptr_t make_garbage_large(void) {
+    return ~(uintptr_t)hornet__heap_alloc(3 * 65536, 1, 0);
+}
+
+static void test_gc_gives_back_a_large_object_s_pages(void) {
+    uintptr_t large = make_garbage_large();
+    struct hornet_heap_stats before, after;
+    hornet__heap_stats(&before);
+    collect();
+    hornet__heap_stats(&after);
+    CHECK_FREED(!alive(large) && !alive(~(~large + 65536 * 2)));  // (from its first page, and its third)
+    CHECK_FREED(after.pages <= before.pages - 3);
+}
+
+__attribute__((noinline)) static void churn(int64_t bytes) {
+    for (int64_t made = 0; made < bytes; made += 64) {
+        int64_t *object = hornet__heap_alloc(64, 1, 0);
+        object[0] = made;
+    }
+}
+
+static void test_gc_reuses_what_it_frees(void) {
+    struct hornet_heap_stats before, after;
+    collect();
+    hornet__heap_stats(&before);
+    churn((int64_t)200 << 20);  // 200 MB, nothing kept: collections as it goes keep the heap small
+    hornet__heap_stats(&after);
+    CHECK(after.collections >= before.collections + 10);
+    CHECK_FREED(after.pages < before.pages + 64 * 16 * 2);  // (a collection's worth of pages, 8 MB, twice over)
+}
+
+__attribute__((noinline)) static uintptr_t make_garbage_bytes(void) {
+    char *object = hornet__heap_alloc(64, 0, 0);
+    memset(object, 'x', 64);
+    return ~(uintptr_t)object;
+}
+
+static void test_gc_poisons_what_it_frees(void) {
+    uintptr_t freed = make_garbage_bytes();
+    collect();
+    const unsigned char *bytes = (const unsigned char *)~freed;
+    int poisoned = !alive(freed);
+    for (int i = 8; i < 64; i++) {  // (the first word links it to the page's other free slots)
+        poisoned &= bytes[i] == 0xdb;
+    }
+    CHECK_FREED(poisoned);
+}
+
 static void test_buffer_growth_stress(void) {
     // A large array forces many reallocations through the real
     // growth policy (starting from stringify_to_cstr's own
@@ -546,7 +709,23 @@ static void test_self_referential_struct(void) {
     free(s);
 }
 
+// Under the address sanitizer, locals stay on the stack, where the collector looks for them (it would
+// otherwise move them elsewhere, to catch their use after their function returns).
+const char *__asan_default_options(void);
+const char *__asan_default_options(void) {
+    return "detect_stack_use_after_return=0";
+}
+
 int main(void) {
+    // Before anything is allocated, when the heap reads its settings. (Not stressed, whatever the
+    // tests are run with: these collect when they mean to, and allocate too much to collect each time.)
+#ifdef _WIN32
+    _putenv("HORNET_GC_POISON=1");
+    _putenv("HORNET_GC_STRESS=0");
+#else
+    setenv("HORNET_GC_POISON", "1", 1);
+    setenv("HORNET_GC_STRESS", "0", 1);
+#endif
     test_int();
     test_int8_uint8();
     test_int32();
@@ -566,6 +745,12 @@ int main(void) {
     test_heap_large_objects();
     test_heap_finds_nothing_elsewhere();
     test_heap_grows_a_str_s_bytes_keeping_them();
+    test_gc_keeps_what_the_stack_reaches_and_frees_the_rest();
+    test_gc_doesnt_look_through_what_holds_no_pointers();
+    test_gc_keeps_an_object_pointed_to_inside();
+    test_gc_gives_back_a_large_object_s_pages();
+    test_gc_reuses_what_it_frees();
+    test_gc_poisons_what_it_frees();
     test_sum_payload();
     test_dict_bucket_layout();
     test_buffer_growth_stress();

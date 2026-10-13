@@ -1,7 +1,9 @@
 """Test tiers. `pytest --quick`: unit tests only, nothing is built or run. `pytest`: adds end-to-end
 tests on this machine's own target. `pytest --full`: adds every runnable target (qemu-user,
 Rosetta 2) and the slow tests (benchmark reruns and runner, scrambled formatter programs,
-sanitizers). HORNET_E2E_TARGETS overrides the targets in any tier."""
+sanitizers). HORNET_E2E_TARGETS overrides the targets in any tier. `--gc-stress`, with either of the
+last two: every program built and run collects garbage before each allocation and poisons what it
+frees (HORNET_GC_STRESS, HORNET_GC_POISON: runtime/heap.c), to show a pointer the collector missed."""
 
 import inspect
 import os
@@ -25,12 +27,19 @@ def pytest_addoption(parser):
     group = parser.addmutuallyexclusivegroup() if hasattr(parser, 'addmutuallyexclusivegroup') else parser
     group.addoption('--quick', action='store_true', help='Unit tests only: build and run nothing')
     group.addoption('--full', action='store_true', help='Every runnable target, and the slow tests')
+    parser.addoption('--gc-stress', action='store_true',
+                     help='Collect garbage before every allocation of every program run, and poison what is freed')
 
 
 def pytest_configure(config):
     if config.getoption('quick') and config.getoption('full'):
         raise pytest.UsageError('--quick and --full are exclusive')
     tier = 'quick' if config.getoption('quick') else 'full' if config.getoption('full') else 'standard'
+    if config.getoption('gc_stress'):
+        if tier == 'quick':
+            raise pytest.UsageError('--gc-stress runs programs, which --quick does not')
+        os.environ['HORNET_GC_STRESS'] = '1'  # inherited by every program the tests run, through qemu and Wine
+        os.environ['HORNET_GC_POISON'] = '1'
     os.environ['HORNET_TEST_TIER'] = tier  # read by tests/targets.py; inherited by xdist workers
     config.addinivalue_line('markers', 'e2e: builds and runs programs (skipped by --quick)')
     config.addinivalue_line('markers', 'slow: run only by --full')

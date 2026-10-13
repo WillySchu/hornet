@@ -93,6 +93,17 @@ struct hornet_heap_object {
 // Whether `address` is in an object on the heap (anywhere in it), and if so which.
 int hornet__heap_find(uintptr_t address, struct hornet_heap_object *found);
 
+// Free what nothing reaches from the stack and the registers. (The heap runs it as it needs to.)
+void hornet__gc_collect(void);
+
+struct hornet_heap_stats {
+    int64_t collections;
+    int64_t pages;        // the heap's 64 KB pages now
+    int64_t live_bytes;   // in objects (their slots) that the last collection kept
+    int64_t freed_bytes;  // by every collection so far
+};
+void hornet__heap_stats(struct hornet_heap_stats *stats);
+
 // The runtime's own scratch memory.
 void *hornet__scratch_alloc(int64_t size);
 void *hornet__scratch_realloc(void *ptr, int64_t size);

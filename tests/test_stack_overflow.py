@@ -3,6 +3,7 @@
 program was. The function is the program's own that was running, found from a table of its
 functions that the compiler writes.) Any other bad memory access is left to crash as before."""
 
+import os
 import signal
 import subprocess
 
@@ -80,8 +81,11 @@ RUNAWAY = {
 @GCC_SKIP
 @each_e2e_target
 @pytest.mark.parametrize('source,functions', RUNAWAY.values(), ids=RUNAWAY.keys())
-def test_a_runaway_recursion_panics(source, functions, target):
+def test_a_runaway_recursion_panics(source, functions, target, monkeypatch):
     # (A target at a time: which of two functions was running is not for them to agree on.)
+    if os.environ.get('HORNET_GC_STRESS'):
+        # Collecting before every allocation, each scanning a stack near its end, would take minutes.
+        monkeypatch.setenv('HORNET_GC_STRESS', '1000')
     result = build_and_run(source, target)
     said = {f"panic: stack overflow in '{function}'\n" for function in functions}
     assert (result.returncode, result.stdout) == (-signal.SIGABRT, "before\n")
