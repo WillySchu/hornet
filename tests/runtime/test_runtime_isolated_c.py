@@ -6,10 +6,10 @@ everything else, rather than needing a separately-remembered manual
 `gcc ... && ./binary` invocation.
 
 test_runtime_isolated.c is a standalone C program, not itself a
-pytest file: it #includes runtime.c directly for white-box access to
-its static internals (see its own module docstring), and reports
-success via exit code and an "all tests passed" stdout line, the same
-contract this file checks.
+pytest file: it is compiled with the runtime's own files, and includes
+runtime/internal.h for what they share (see its own comment), and
+reports success via exit code and an "all tests passed" stdout line,
+the same contract this file checks.
 """
 import shutil
 import subprocess
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from build import c_compiler, executable_name, link_flags
+from build import c_compiler, executable_name, link_flags, runtime_sources
 from tests.targets import each_runnable_target, is_native, run_binary
 
 RUNTIME_DIR = Path(__file__).resolve().parent.parent.parent / "runtime"
@@ -32,8 +32,10 @@ def _compile_and_run(target, extra_flags: list[str]) -> subprocess.CompletedProc
     with tempfile.TemporaryDirectory() as tmpdir:
         binary = f"{tmpdir}/{executable_name('test_runtime_isolated', target)}"
         subprocess.run(
-            [*c_compiler(target), "-Wall", "-Wextra", "-std=c11", *extra_flags, str(TEST_ISOLATED_C), "-o", binary,
-             *link_flags(target)],
+            # (A call to an undeclared function is an error, as clang, macOS's gcc, has it everywhere.)
+            [*c_compiler(target), "-Wall", "-Wextra", "-Werror=implicit-function-declaration", "-std=c11",
+             *extra_flags, str(TEST_ISOLATED_C),
+             *map(str, runtime_sources(target)), "-o", binary, *link_flags(target)],
             check=True, capture_output=True, text=True,
         )
         return run_binary(target, [binary], capture_output=True, text=True)
@@ -50,7 +52,7 @@ def test_isolated_c_tests_pass(target):
 def test_isolated_c_tests_pass_under_sanitizers(target):
     """The same suite, compiled with AddressSanitizer and
     UndefinedBehaviorSanitizer -- this is exactly the combination that
-    caught a genuine misaligned-access bug in runtime.c during initial
+    caught a genuine misaligned-access bug in the runtime during initial
     development (a plain, unsanitized run passed silently), so it's
     worth running as its own, separate check rather than folding into
     the plain run above and losing the distinction if one ever passes

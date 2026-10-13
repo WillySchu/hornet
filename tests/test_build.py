@@ -1,7 +1,7 @@
 """Tests for build.py's own build_executable: the one entry point
 that compiles a Hornet source file AND links it against a freshly-
-compiled runtime.c into a single, runnable executable -- the piece of
-the toolchain that didn't exist at all before runtime.c did (see
+built runtime into a single, runnable executable -- the piece of
+the toolchain that didn't exist at all before the runtime did (see
 build.py's own module docstring).
 """
 
@@ -48,10 +48,19 @@ def test_build_executable_propagates_semantic_errors_directly():
         assert not isinstance(exc_info.value, build.BuildError)
 
 
+def _runtime_copy(tmp_path):
+    """A copy of the runtime's sources, for a test to change."""
+    import shutil
+    copy = tmp_path / "runtime"
+    shutil.copytree(build.RUNTIME_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    return copy
+
+
 def test_build_executable_raises_build_error_with_actionable_message_on_bad_runtime_c(monkeypatch, tmp_path):
-    broken_runtime_c = tmp_path / "broken_runtime.c"
-    broken_runtime_c.write_text("this is not valid C at all !!!\n")
-    monkeypatch.setattr(build, "RUNTIME_C_PATH", broken_runtime_c)
+    runtime = _runtime_copy(tmp_path)
+    (runtime / "memory.c").write_text("this is not valid C at all !!!\n")
+    monkeypatch.setattr(build, "RUNTIME_DIR", runtime)
+    monkeypatch.setenv("HORNET_CACHE_DIR", str(tmp_path / "cache"))
 
     source = tmp_path / "program.ht"
     source.write_text("def int main():\n    return 0\n")
@@ -60,7 +69,7 @@ def test_build_executable_raises_build_error_with_actionable_message_on_bad_runt
     with pytest.raises(build.BuildError) as exc_info:
         build.build_executable(str(source), str(binary))
     message = str(exc_info.value)
-    assert "compiling runtime.c" in message
+    assert "compiling runtime/memory.c" in message
     assert "gcc" in message
 
 
@@ -116,7 +125,7 @@ def test_cross_toolchain_and_run_prefix_selection(monkeypatch):
 
 def test_missing_toolchain_is_a_build_error():
     with pytest.raises(build.BuildError, match="'no-such-cc' not found"):
-        build._run(["no-such-cc", "-c", "x.c"], "compiling runtime.c")
+        build._run(["no-such-cc", "-c", "x.c"], "compiling runtime/x.c")
 
 
 def test_default_target_is_the_host_now_that_both_architectures_have_backends(monkeypatch):
@@ -127,19 +136,47 @@ def test_default_target_is_the_host_now_that_both_architectures_have_backends(mo
         assert target.default_target() == host
 
 
-def test_runtime_object_is_built_once_and_rebuilt_when_the_runtime_changes(monkeypatch, tmp_path):
+def test_the_runtime_is_built_once_and_rebuilt_when_it_changes(monkeypatch, tmp_path):
     from target import default_target
     monkeypatch.setenv("HORNET_CACHE_DIR", str(tmp_path / "cache"))
     calls = []
     real_run = build._run
     monkeypatch.setattr(build, "_run", lambda args, step: (calls.append(step), real_run(args, step)))
-    first = build.runtime_object(default_target())
-    assert build.runtime_object(default_target()) == first and calls == ["compiling runtime.c"]
-    assert first.parent == tmp_path / "cache" and first.exists()
-    import shutil
-    shutil.copytree(build.RUNTIME_C_PATH.parent, tmp_path / "runtime", ignore=shutil.ignore_patterns("__pycache__"))
-    changed = tmp_path / "runtime" / "runtime.c"
-    changed.write_text(changed.read_text() + "\n/* changed */\n")
-    monkeypatch.setattr(build, "RUNTIME_C_PATH", changed)
-    second = build.runtime_object(default_target())
-    assert second != first and len(calls) == 2
+    first = build.runtime_objects(default_target())
+    built = len(calls)
+    assert built == len(build.runtime_sources(default_target())) + 1  # each file, then the archive
+    assert build.runtime_objects(default_target()) == first and len(calls) == built
+    assert [path.parent for path in first] == [tmp_path / "cache"] * 2 and all(path.exists() for path in first)
+    runtime = _runtime_copy(tmp_path)
+    monkeypatch.setattr(build, "RUNTIME_DIR", runtime)
+    assert build.runtime_objects(default_target()) == first  # (the same sources)
+    for name in ("dict.c", "internal.h"):  # a header changes it too
+        (runtime / name).write_text((runtime / name).read_text() + "\n/* changed */\n")
+        assert build.runtime_objects(default_target()) not in (first, [])
+    assert len(calls) == 3 * built
+
+
+def test_each_target_gets_its_own_platform_s_files():
+    from target import Target
+    names = lambda t: [path.name for path in build.runtime_sources(Target.parse(t))]
+    assert "stack_windows.c" in names("x86_64-windows") and "stack_posix.c" not in names("x86_64-windows")
+    for t in ("x86_64-linux", "aarch64-linux", "aarch64-macos"):
+        assert "stack_posix.c" in names(t) and "stack_windows.c" not in names(t)
+    assert all(not name.startswith("test_") for name in names("x86_64-linux"))
+    assert build.RUNTIME_START in names("x86_64-windows") and build.RUNTIME_START in names("x86_64-linux")
+
+
+def test_every_runtime_file_is_listed():
+    """Each C file in runtime/ is built into the runtime, or is a test; one left out of
+    build.RUNTIME_FILES, or left behind after it was taken out, is noticed here."""
+    found = {path.name for path in build.RUNTIME_DIR.glob("*.c") if not path.name.startswith("test_")}
+    assert found == set(build.RUNTIME_FILES), (
+        f"in runtime/ but not build.RUNTIME_FILES: {sorted(found - set(build.RUNTIME_FILES))}; "
+        f"listed but not there: {sorted(set(build.RUNTIME_FILES) - found)}")
+
+
+def test_the_archiver_goes_with_the_compiler():
+    from target import Target
+    assert build.archiver(Target('x86_64', 'macos')) == "ar"
+    assert build.archiver(Target('aarch64', 'linux')) in ("ar", "aarch64-linux-gnu-ar")
+    assert build.archiver(Target('x86_64', 'windows')) in ("ar", "x86_64-w64-mingw32-ar")

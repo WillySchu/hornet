@@ -1,7 +1,7 @@
-// White-box tests of runtime.c: hand-built type descriptors, shaped as ir/typedesc.py emits them,
-// formatted through hornet_stringify and hornet_print. runtime.c is #included, not linked, to
-// reach its static functions.
-#include "runtime.c"
+// White-box tests of the runtime: hand-built type descriptors, shaped as ir/typedesc.py emits them,
+// formatted through hornet__stringify and hornet_print. Compiled with the runtime's own files, and
+// with what they share (internal.h) to reach past the entry points.
+#include "internal.h"
 
 #ifdef _WIN32
 #define pipe(fds) _pipe(fds, 65536, _O_BINARY)  // what MinGW has for POSIX's pipe(2)
@@ -32,7 +32,7 @@ static char *stringify_to_cstr(void *value_addr, const uint64_t *type_desc, int 
     buf.cap = 4;  // deliberately tiny, to force growth on almost every test
     buf.ptr = malloc((size_t)buf.cap);
     buf.len = 0;
-    hornet_stringify(value_addr, (const unsigned char *)type_desc, quote_strings, &buf);
+    hornet__stringify(value_addr, (const unsigned char *)type_desc, quote_strings, &buf);
     char *result = malloc((size_t)buf.len + 1);
     memcpy(result, buf.ptr, (size_t)buf.len);
     result[buf.len] = '\0';

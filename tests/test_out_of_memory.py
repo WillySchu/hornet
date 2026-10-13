@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from build import build_executable, c_compiler, executable_name, link_flags, runtime_object
+from build import build_executable, c_compiler, executable_name, link_flags, runtime_objects
 from compile import compile_to_asm
 from target import default_target
 from tests.targets import WINDOWS_ABORT_EXIT_CODE, each_runnable_target, run_binary
@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
 def test_the_allocators_themselves(target, tmp_path):
     source, binary = tmp_path / "alloc.c", tmp_path / executable_name("alloc", target)
     source.write_text(C_PROGRAM)
-    subprocess.run([*c_compiler(target), str(source), str(runtime_object(target)), "-o", str(binary),
+    subprocess.run([*c_compiler(target), str(source), *map(str, runtime_objects(target)), "-o", str(binary),
                     *link_flags(target)], check=True, capture_output=True)
     aborted = (-signal.SIGABRT, WINDOWS_ABORT_EXIT_CODE)
     fine = run_binary(target, [binary], capture_output=True, text=True)

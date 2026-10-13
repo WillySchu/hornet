@@ -19,7 +19,7 @@ import pytest
 from compile import generate_asm
 from backend.errors import CodegenError
 from ir.errors import IRError
-from build import c_compiler, executable_name, link_flags, runtime_object
+from build import c_compiler, executable_name, link_flags, runtime_objects
 from target import default_target
 from tests.targets import E2E_TARGETS, on_every_target, posix, run_binary
 from lexer import lex
@@ -68,7 +68,7 @@ def _compile_to_binary(source: str, tmp: Path, target=ASM_TARGET) -> tuple[Path,
     asm_path.write_text(asm, encoding="latin-1")
 
     gcc_cmd = c_compiler(target) + [
-        str(asm_path), str(runtime_object(target)), "-o", str(bin_path)] + link_flags(target)
+        str(asm_path), *map(str, runtime_objects(target)), "-o", str(bin_path)] + link_flags(target)
 
     result = subprocess.run(gcc_cmd, capture_output=True, text=True)
     if result.returncode != 0:

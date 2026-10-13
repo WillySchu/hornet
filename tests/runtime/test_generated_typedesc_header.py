@@ -7,7 +7,7 @@ type-descriptor ABI (see generate_typedesc_header.py's own module
 docstring for what this does and doesn't cover): if someone changes a
 _TYPEDESC_* value in ir/typedesc.py and forgets to re-run the
 generator and check in the result, this test fails, rather than the
-mismatch surviving silently until it corrupts something a runtime.c
+mismatch surviving silently until it corrupts something runtime code
 that trusted the stale header actually reads. There is not yet a build
 step that regenerates this file automatically -- this test is what
 catches that gap until one exists.

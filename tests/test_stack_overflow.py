@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from build import c_compiler, executable_name, link_flags, runtime_object
+from build import c_compiler, executable_name, link_flags, runtime_objects
 from tests.targets import (
     WINDOWS_ABORT_EXIT_CODE, build_and_run, each_e2e_target, each_runnable_target, run_binary, under_rosetta)
 from tests.test_compiler import GCC_SKIP, compile_and_run
@@ -98,7 +98,7 @@ def test_with_no_table_of_functions_none_is_named(target, tmp_path):
         "volatile int sink;\n"
         "int deep(int n) { volatile char pad[256]; pad[n % 256] = 1; sink = pad[0]; return deep(n + 1) + sink; }\n"
         "int main(void) { return deep(0); }\n")
-    subprocess.run([*c_compiler(target), "-O0", str(source), str(runtime_object(target)), "-o", str(binary),
+    subprocess.run([*c_compiler(target), "-O0", str(source), *map(str, runtime_objects(target)), "-o", str(binary),
                     *link_flags(target)], check=True, capture_output=True)
     result = run_binary(target, [binary], capture_output=True, text=True)
     if not under_rosetta(target):
@@ -157,7 +157,7 @@ def test_a_deep_recursion_that_fits_is_untouched():
 def test_another_bad_memory_access_still_just_crashes(target, tmp_path):
     source, binary = tmp_path / "bad.c", tmp_path / executable_name("bad", target)
     source.write_text("int main(void) { volatile int *nowhere = (int *)8; return *nowhere; }\n")
-    subprocess.run([*c_compiler(target), str(source), str(runtime_object(target)), "-o", str(binary),
+    subprocess.run([*c_compiler(target), str(source), *map(str, runtime_objects(target)), "-o", str(binary),
                     *link_flags(target)], check=True, capture_output=True)
     result = run_binary(target, [binary], capture_output=True)
     assert b"stack overflow" not in result.stderr

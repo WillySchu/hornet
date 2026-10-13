@@ -1,0 +1,155 @@
+// Declarations the runtime's files share, and what each includes first. Not for the compiled code:
+// what it calls is each file's own `hornet_` functions. A name here that is a function's starts with
+// `hornet__`, which a program's own functions, and the C functions it declares `extern`, don't.
+#ifndef HORNET_INTERNAL_H
+#define HORNET_INTERNAL_H
+
+// What the system's headers are asked for beyond standard C: POSIX with its extensions (signal
+// stacks), and on macOS the system's own (a thread's stack).
+#ifndef _WIN32
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE
+#endif
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#ifdef _WIN32
+#include <winsock2.h>  // (before windows.h, which would otherwise bring in the older winsock.h)
+#include <ws2tcpip.h>
+#include <io.h>
+// Files are opened binary: Hornet's I/O is bytes (see start.c).
+#define HORNET_O_BINARY _O_BINARY
+#else
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#define HORNET_O_BINARY 0
+#endif
+
+#include "hornet_typedesc_tags.h"
+
+// ---- The start of a program (start.c).
+
+// Ready to catch a stack overflow (stack_posix.c, stack_windows.c).
+void hornet__catch_stack_overflow(void);
+
+// ---- A stack overflow (stack.c).
+
+// The first part of what is said: before the function is looked for, so that it is said whatever
+// becomes of the looking.
+#define HORNET_STACK_OVERFLOW "panic: stack overflow"
+
+// The program's function that `address` is in, or NULL.
+const char *hornet__function_at(const char *address);
+
+// The rest of what is said: " in 'function'\n", or only the newline if there is no function to name.
+// Its length. (Nothing here allocates.)
+size_t hornet__stack_overflow_rest(char *text, size_t room, const char *function);
+
+// ---- Memory (memory.c).
+
+// `count` items of `size` bytes, uninitialized.
+void *hornet__alloc_items(int64_t count, int64_t size);
+
+// realloc, for the runtime's own growing buffers.
+void *hornet__realloc(void *ptr, int64_t size);
+
+void *hornet_alloc(int64_t size);
+void *hornet_alloc_zeroed(int64_t count, int64_t size);
+
+// Bucket state byte. Tombstones keep probe chains intact after deletion.
+#define HORNET_DICT_BUCKET_EMPTY 0
+#define HORNET_DICT_BUCKET_OCCUPIED 1
+#define HORNET_DICT_BUCKET_TOMBSTONE 2
+
+// Growable byte buffer for print.
+struct hornet_buf {
+    char *ptr;
+    int64_t len;
+    int64_t cap;
+};
+
+// Ensure `additional` spare bytes, growing by doubling.
+void hornet__buf_ensure(struct hornet_buf *buf, int64_t additional);
+
+static inline void hornet_buf_append_bytes(struct hornet_buf *buf, const char *data, int64_t count) {
+    hornet__buf_ensure(buf, count);
+    memcpy(buf->ptr + buf->len, data, (size_t)count);
+    buf->len += count;
+}
+
+static inline void hornet_buf_append_byte(struct hornet_buf *buf, char byte_value) {
+    hornet_buf_append_bytes(buf, &byte_value, 1);
+}
+
+static inline void hornet_buf_append_cstr(struct hornet_buf *buf, const char *s) {
+    hornet_buf_append_bytes(buf, s, (int64_t)strlen(s));
+}
+
+// A slice's header, as the compiled code keeps one.
+struct hornet_slice {
+    void *ptr;
+    int64_t len;
+    int64_t cap;
+};
+
+// Unaligned reads: Hornet structs are packed.
+static inline int32_t read_i32(const void *addr) {
+    int32_t value;
+    memcpy(&value, addr, sizeof(value));
+    return value;
+}
+
+static inline int64_t read_i64(const void *addr) {
+    int64_t value;
+    memcpy(&value, addr, sizeof(value));
+    return value;
+}
+
+static inline void *read_ptr(const void *addr) {
+    void *value;
+    memcpy(&value, addr, sizeof(value));
+    return value;
+}
+
+// `index`-th 8-byte word of a type descriptor.
+static inline uint64_t read_desc_word(const unsigned char *desc, int64_t index) {
+    uint64_t value;
+    memcpy(&value, desc + index * 8, sizeof(value));
+    return value;
+}
+
+// ---- Formatting (format.c).
+
+// Format the value at value_addr per type_desc (type_desc[0] is the kind tag).
+void hornet__stringify(void *value_addr, const unsigned char *type_desc, int quote_strings, struct hornet_buf *buf);
+
+void hornet_print(void *value_addr, const unsigned char *type_desc);
+
+int64_t hornet_write_fd(int64_t fd, const char *ptr, int64_t len);
+
+// ---- The system's errors (system.c).
+//
+// The calls differ between POSIX and Windows, and so do their errors: errno there, GetLastError()
+// here. hornet_system_error says why the most recent call that noted one failed, either way.
+
+#ifdef _WIN32
+void hornet__system_failed_with(DWORD code);
+#else
+void hornet__system_failed_with(int code);
+#endif
+
+// The most recent call's own error.
+void hornet__system_failed(void);
+
+#endif

@@ -1,4 +1,4 @@
-"""Type descriptors: static data describing a type, which runtime.c's printer walks."""
+"""Type descriptors: static data describing a type, which the runtime's printer (runtime/format.c) walks."""
 
 from ir.errors import IRError
 from typesys import Type, TypeKind, type_byte_width

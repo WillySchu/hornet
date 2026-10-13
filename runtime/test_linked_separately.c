@@ -1,6 +1,6 @@
-// hornet_print called the way compiled programs call it: runtime.c compiled and linked as a
-// separate object, behind an extern declaration. (test_runtime_isolated.c #includes runtime.c
-// instead, to reach its static functions.)
+// hornet_print called the way compiled programs call it: the runtime as build.py builds it, linked
+// with this, behind an extern declaration. (test_runtime_isolated.c includes internal.h instead,
+// to reach what the runtime's files share.)
 #include <stdint.h>
 #include <string.h>
 
@@ -9,7 +9,7 @@ extern void hornet_print(void *value_addr, const unsigned char *type_desc);
 // Matches HORNET_TYPEDESC_INT's own value directly (0) rather than
 // including hornet_typedesc_tags.h, specifically to confirm this
 // test exercises hornet_print as an opaque, externally-linked
-// function -- not by reaching into runtime.c's own build artifacts.
+// function -- not by reaching into the runtime's own headers.
 #define TYPEDESC_INT 0
 
 int main(void) {

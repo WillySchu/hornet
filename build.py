@@ -1,4 +1,4 @@
-"""Build an executable: compile .ht to assembly, compile runtime.c, link."""
+"""Build an executable: compile .ht to assembly, build the runtime, link."""
 
 import argparse
 import hashlib
@@ -15,7 +15,16 @@ from diagnostics import file_error, run_cli, write_output
 from target import Target, as_target, host_target
 
 REPO_ROOT = Path(__file__).resolve().parent
-RUNTIME_C_PATH = REPO_ROOT / "runtime" / "runtime.c"
+RUNTIME_DIR = REPO_ROOT / "runtime"
+# The runtime's C files: a `_windows.c` one is built only for Windows, a `_posix.c` one only elsewhere.
+# By name, so that a file left behind in runtime/ isn't built into it.
+RUNTIME_FILES = (
+    "start.c", "stack.c", "stack_posix.c", "stack_windows.c", "memory.c", "panic.c", "format.c", "slice.c",
+    "dict.c", "io.c", "fs.c", "net.c", "system.c", "process_posix.c", "process_windows.c",
+)
+# The runtime's file that every program links whole: what runs before main is in it, and nothing
+# calls into it, so the linker would leave it out if it were taken from the archive with the rest.
+RUNTIME_START = "start.c"
 
 
 def c_compiler(target: Target) -> list[str]:
@@ -101,26 +110,50 @@ def cache_dir() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "hornet"
 
 
-def runtime_object(target: Target) -> Path:
-    """runtime.c compiled for `target`, built once and reused: the file name carries a hash of the
-    runtime's sources and the compile command, so any change builds a new one. Written atomically,
-    so concurrent builds can share it."""
+def archiver(target: Target) -> str:
+    """The `ar` that goes with c_compiler(target): a cross toolchain's has its prefix."""
+    compiler = c_compiler(target)[0]
+    return compiler[:-len("gcc")] + "ar" if compiler.endswith("-gcc") else "ar"
+
+
+def runtime_sources(target: Target) -> list[Path]:
+    """The runtime's C files for `target` (see RUNTIME_FILES)."""
+    left_out = "_posix.c" if target.os == 'windows' else "_windows.c"
+    return [RUNTIME_DIR / name for name in RUNTIME_FILES if not name.endswith(left_out)]
+
+
+def runtime_objects(target: Target) -> list[Path]:
+    """The runtime built for `target`, as what a program links with it: start.c's object, then an
+    archive of the rest, from which the linker takes only what the program uses. Built once and
+    reused: the names carry a hash of the runtime's sources and the commands, so any change builds
+    them anew. Written atomically, so concurrent builds can share them."""
     command = c_compiler(target) + ["-c"]
-    digest = hashlib.sha256(" ".join(command).encode())
-    for path in [RUNTIME_C_PATH, *sorted(RUNTIME_C_PATH.parent.glob("*.h"))]:
-        digest.update(path.read_bytes())
-    obj = cache_dir() / f"runtime-{target}-{digest.hexdigest()[:16]}.o"
-    if not obj.exists():
-        obj.parent.mkdir(parents=True, exist_ok=True)
-        partial = obj.with_name(f"{obj.stem}.{os.getpid()}.partial.o")
-        _run(command + [str(RUNTIME_C_PATH), "-o", str(partial)], "compiling runtime.c")
-        os.replace(partial, obj)
-    return obj
+    digest = hashlib.sha256(" ".join(command + [archiver(target)]).encode())
+    sources = runtime_sources(target)
+    for path in [*sources, *sorted(RUNTIME_DIR.glob("*.h"))]:
+        digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    stem = cache_dir() / f"runtime-{target}-{digest.hexdigest()[:16]}"
+    start, archive = stem.with_name(f"{stem.name}-start.o"), stem.with_name(f"{stem.name}.a")
+    if not (start.exists() and archive.exists()):
+        start.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=start.parent) as tmpdir:
+            objects = []
+            for source in sources:
+                obj = Path(tmpdir) / f"{source.stem}.o"
+                _run(command + [str(source), "-o", str(obj)], f"compiling runtime/{source.name}")
+                objects.append(obj)
+            built_start = Path(tmpdir) / f"{Path(RUNTIME_START).stem}.o"
+            built_archive = Path(tmpdir) / "runtime.a"
+            _run([archiver(target), "rcs", str(built_archive)] + [str(o) for o in objects if o != built_start],
+                 "archiving the runtime")
+            os.replace(built_start, start)
+            os.replace(built_archive, archive)
+    return [start, archive]
 
 
 def build_executable(source_path: str, output_path: str, target=None) -> None:
     """Compile `source_path` for `target` (Target, `arch-os`, or None for the default) and link it
-    with runtime.c into `output_path`."""
+    with the runtime into `output_path`."""
     target = as_target(target)
     asm = compile_to_asm(source_path, target, require_main=True)
     cc = c_compiler(target)
@@ -131,7 +164,8 @@ def build_executable(source_path: str, output_path: str, target=None) -> None:
 
         # The output is written exactly where asked, whatever name the linker would choose.
         linked = os.path.join(tmpdir, executable_name("program", target))
-        _run(cc + [asm_path, str(runtime_object(target)), "-o", linked] + link_flags(target), "linking")
+        runtime = [str(path) for path in runtime_objects(target)]
+        _run(cc + [asm_path, *runtime, "-o", linked] + link_flags(target), "linking")
         try:
             shutil.move(linked, output_path)
         except OSError as problem:

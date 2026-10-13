@@ -42,7 +42,7 @@ def pytest_configure(config):
 E2E_HELPERS = {
     'compile_and_run', 'assert_exit_code', 'assert_program_exit_code', 'assert_stdout', 'assert_program_stdout',
     'assert_panics', 'assert_crashes_with_sigabrt', '_compile_to_binary', '_run_binary', 'build_and_run',
-    'on_every_target', 'build_executable', 'run_binary', 'runtime_object', 'hfmt',
+    'on_every_target', 'build_executable', 'run_binary', 'runtime_objects', 'hfmt',
 }
 _module_e2e_names: dict = {}
 
@@ -105,5 +105,5 @@ def _forbid_building():
 
     def refuse(*args, **kwargs):
         raise AssertionError('this test builds a program: mark it e2e (see conftest.py) or run without --quick')
-    build.runtime_object = refuse
+    build.runtime_objects = refuse
     build.build_executable = refuse

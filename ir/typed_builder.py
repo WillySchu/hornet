@@ -45,7 +45,7 @@ def _ported(type_: Type) -> bool:
 
 
 _PLACE_NODES = (t.Local, t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)
-_DICT_BUCKET_OCCUPIED = 1  # runtime.c's HORNET_DICT_BUCKET_OCCUPIED
+_DICT_BUCKET_OCCUPIED = 1  # runtime/internal.h's HORNET_DICT_BUCKET_OCCUPIED
 _DICT_HEADER_SIZE = 32  # {buckets, count, tombstones, capacity}
 
 

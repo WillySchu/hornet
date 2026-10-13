@@ -1,4 +1,4 @@
-"""The table of a program's functions that the runtime reads (runtime.c's hornet_functions): where
+"""The table of a program's functions that the runtime reads (runtime/stack.c's hornet_functions): where
 each starts and ends, and its name. With it an address can be put to a name, which is how a stack
 overflow says which function it was in."""
 
