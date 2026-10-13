@@ -74,6 +74,25 @@ void *hornet__alloc_items(int64_t count, int64_t size, int holds_pointers);
 // Grow memory from hornet_alloc_atomic to `size` bytes, keeping what it held: a str being built.
 void *hornet__realloc_atomic(void *ptr, int64_t size);
 
+// `panic: out of memory (allocating N bytes)`, or `N x M bytes` when `size` isn't negative. No
+// allocation: this is no time for it.
+void hornet__out_of_memory(int64_t count, int64_t size);
+
+// ---- The heap (heap.c), where the program's values are.
+
+// `size` bytes (not negative). All zero if it may hold pointers or `zeroed`, else uninitialized.
+void *hornet__heap_alloc(int64_t size, int holds_pointers, int zeroed);
+
+// The object an address is in.
+struct hornet_heap_object {
+    char *start;
+    int64_t size;  // a small object's slot's, which may be more than was asked for
+    int holds_pointers;
+};
+
+// Whether `address` is in an object on the heap (anywhere in it), and if so which.
+int hornet__heap_find(uintptr_t address, struct hornet_heap_object *found);
+
 // The runtime's own scratch memory.
 void *hornet__scratch_alloc(int64_t size);
 void *hornet__scratch_realloc(void *ptr, int64_t size);

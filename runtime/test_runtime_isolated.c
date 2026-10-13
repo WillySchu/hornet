@@ -24,6 +24,14 @@ static int g_failures = 0;
         }                                                                                    \
     } while (0)
 
+#define CHECK(condition)                                                                    \
+    do {                                                                                    \
+        if (!(condition)) {                                                                 \
+            fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition);            \
+            g_failures++;                                                                   \
+        }                                                                                   \
+    } while (0)
+
 // Stringifies value_addr/type_desc with the given quote_strings into
 // a fresh buffer and returns a null-terminated copy of the result --
 // caller must free() it.
@@ -353,6 +361,83 @@ static void test_dict_bucket_layout(void) {
     free(s);
 }
 
+// The heap: every address inside an object leads to the object, and no other address does.
+static void test_heap_finds_each_object_from_inside_it(void) {
+    static const int64_t sizes[] = {0, 1, 7, 8, 9, 24, 40, 64, 65, 100, 1000, 4097, 20000, 32768};
+    for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
+        for (int holds = 0; holds <= 1; holds++) {
+            int64_t size = sizes[i];
+            char *object = hornet__heap_alloc(size, holds, 0);
+            struct hornet_heap_object found;
+            CHECK((uintptr_t)object % 8 == 0);
+            CHECK(hornet__heap_find((uintptr_t)object, &found) && found.start == object);
+            CHECK(found.size >= size && found.size < (size < 8 ? 8 : size) * 5 / 4 + 8);  // its class, a quarter apart
+            CHECK(found.holds_pointers == holds);
+            CHECK(hornet__heap_find((uintptr_t)object + (uintptr_t)found.size - 1, &found) && found.start == object);
+            if (holds) {
+                int zero = 1;  // the whole slot, so that nothing it held before looks like a pointer
+                for (int64_t j = 0; j < found.size; j++) {
+                    zero &= object[j] == 0;
+                }
+                CHECK(zero);
+            }
+        }
+    }
+}
+
+static void test_heap_tells_a_slot_not_handed_out(void) {
+    char *object = hornet__heap_alloc(20000, 1, 0);  // (a class few others use: 20480 bytes, 3 to a page)
+    struct hornet_heap_object found;
+    CHECK(hornet__heap_find((uintptr_t)object, &found) && found.size == 20480);
+    struct hornet_heap_object after;
+    int next = hornet__heap_find((uintptr_t)object + 20480, &after);
+    CHECK(!next || after.start == object + 20480);  // the next slot: someone else's object, or none yet
+    char *second = hornet__heap_alloc(20000, 1, 0);
+    CHECK(hornet__heap_find((uintptr_t)second + 100, &found) && found.start == second);
+}
+
+static void test_heap_large_objects(void) {
+    int64_t size = 3 * 65536 + 1000;  // four pages, the last mostly unused
+    char *object = hornet__heap_alloc(size, 0, 1);
+    struct hornet_heap_object found;
+    CHECK((uintptr_t)object % 65536 == 0);
+    CHECK(object[0] == 0 && object[size - 1] == 0);
+    for (int64_t at = 0; at < size; at += 65536 / 2) {
+        int in = hornet__heap_find((uintptr_t)object + (uintptr_t)at, &found);
+        CHECK(in && found.start == object && found.size == size);
+    }
+    CHECK(hornet__heap_find((uintptr_t)object + (uintptr_t)size - 1, &found) && found.start == object);
+    CHECK(!hornet__heap_find((uintptr_t)object + (uintptr_t)size, &found));  // the rest of its last page
+    CHECK(!found.holds_pointers);
+}
+
+static int g_static_value;
+
+static void test_heap_finds_nothing_elsewhere(void) {
+    int local = 0;
+    struct hornet_heap_object found;
+    void *from_malloc = malloc(64);
+    CHECK(!hornet__heap_find(0, &found));
+    CHECK(!hornet__heap_find(1, &found));
+    CHECK(!hornet__heap_find(UINTPTR_MAX, &found));
+    CHECK(!hornet__heap_find((uintptr_t)&local, &found));
+    CHECK(!hornet__heap_find((uintptr_t)&g_static_value, &found));
+    CHECK(!hornet__heap_find((uintptr_t)from_malloc, &found));
+    CHECK(!hornet__heap_find((uintptr_t)"a literal", &found));
+    free(from_malloc);
+}
+
+static void test_heap_grows_a_str_s_bytes_keeping_them(void) {
+    char *text = hornet_alloc_atomic(5);
+    memcpy(text, "hello", 5);
+    char *same = hornet__realloc_atomic(text, 8);  // (its slot is 8 bytes already)
+    CHECK(same == text);
+    char *grown = hornet__realloc_atomic(text, 100000);
+    CHECK(grown != text && memcmp(grown, "hello", 5) == 0);
+    struct hornet_heap_object found;
+    CHECK(hornet__heap_find((uintptr_t)grown + 99999, &found) && found.start == grown && !found.holds_pointers);
+}
+
 static void test_buffer_growth_stress(void) {
     // A large array forces many reallocations through the real
     // growth policy (starting from stringify_to_cstr's own
@@ -476,6 +561,11 @@ int main(void) {
     test_nested_struct_field();
     test_self_referential_struct();
     test_padded_struct();
+    test_heap_finds_each_object_from_inside_it();
+    test_heap_tells_a_slot_not_handed_out();
+    test_heap_large_objects();
+    test_heap_finds_nothing_elsewhere();
+    test_heap_grows_a_str_s_bytes_keeping_them();
     test_sum_payload();
     test_dict_bucket_layout();
     test_buffer_growth_stress();
