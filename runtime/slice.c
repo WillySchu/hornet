@@ -18,14 +18,18 @@ void hornet_bytes(struct hornet_slice *out, const char *ptr, int64_t len) {
 // may hold a pointer.
 void *hornet_slice_grow(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
     void *new_ptr = hornet__alloc_items(new_cap, element_width, 1);
-    memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
+    if (len > 0) {  // (an empty slice may have no pointer, and memcpy is never given NULL)
+        memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
+    }
     return new_ptr;
 }
 
 // The same, for elements that hold none.
 void *hornet_slice_grow_atomic(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
     void *new_ptr = hornet__alloc_items(new_cap, element_width, 0);
-    memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
+    if (len > 0) {  // (an empty slice may have no pointer, and memcpy is never given NULL)
+        memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
+    }
     return new_ptr;
 }
 

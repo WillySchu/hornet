@@ -12,11 +12,13 @@
 
 // Elsewhere it is a signal, handled on a stack of its own (the program's has no room left).
 static char hornet_signal_stack[64 * 1024];
-// The stack's range, as far as it is known: its lowest address is an estimate on Linux.
-static char *hornet_stack_low, *hornet_stack_high;
+// The stack's range, as far as it is known: its lowest address is an estimate on Linux. (Kept as
+// numbers: as pointers, reaching past the stack or comparing with a fault's address would be
+// undefined behaviour, which an optimizing compiler may act on.)
+static uintptr_t hornet_stack_low, hornet_stack_high;
 // A frame larger than the protected memory below the stack can step past it, so a fault this far
 // below the stack still counts.
-#define HORNET_BELOW_STACK ((intptr_t)64 * 1024 * 1024)
+#define HORNET_BELOW_STACK ((uintptr_t)64 * 1024 * 1024)
 
 #ifdef __APPLE__
 // macOS's unwinder ends its walk at the first frame that has no unwind table, without reporting
@@ -43,8 +45,8 @@ static const char *hornet_function_up_the_frames(uintptr_t pc, uintptr_t link, u
     for (int depth = 0; name == NULL && depth < 256; depth++) {
         // What a frame pointer points at is two words in the stack, above the fault. Anything else
         // is no frame pointer, and nothing is read through it.
-        if (frame % sizeof(uintptr_t) != 0 || frame <= fault || frame < (uintptr_t)hornet_stack_low
-            || frame + 2 * sizeof(uintptr_t) > (uintptr_t)hornet_stack_high) {
+        if (frame % sizeof(uintptr_t) != 0 || frame <= fault || frame < hornet_stack_low
+            || frame + 2 * sizeof(uintptr_t) > hornet_stack_high) {
             break;
         }
         const uintptr_t *held = (const uintptr_t *)frame;
@@ -57,7 +59,7 @@ static const char *hornet_function_up_the_frames(uintptr_t pc, uintptr_t link, u
     return name;
 }
 
-static const char *hornet_running_function(void *context, const char *fault) {
+static const char *hornet_running_function(void *context, uintptr_t fault) {
     const ucontext_t *at = (const ucontext_t *)context;
 #if defined(__x86_64__)
     uintptr_t pc = (uintptr_t)at->uc_mcontext->__ss.__rip, frame = (uintptr_t)at->uc_mcontext->__ss.__rbp, link = 0;
@@ -69,7 +71,7 @@ static const char *hornet_running_function(void *context, const char *fault) {
     uintptr_t pc = (uintptr_t)at->uc_mcontext->__ss.__pc, frame = (uintptr_t)at->uc_mcontext->__ss.__fp;
     uintptr_t link = (uintptr_t)at->uc_mcontext->__ss.__lr;
 #endif
-    return hornet_function_up_the_frames(pc, link, frame, (uintptr_t)fault);
+    return hornet_function_up_the_frames(pc, link, frame, fault);
 }
 #else
 // One frame of the walk back from the signal's handler: if it is in one of the program's
@@ -90,7 +92,7 @@ static _Unwind_Reason_Code hornet_note_function(struct _Unwind_Context *frame, v
 
 // The program's function that was running when the signal came: found by unwinding from here,
 // through the signal's own frame and any C the program had called.
-static const char *hornet_running_function(void *context, const char *fault) {
+static const char *hornet_running_function(void *context, uintptr_t fault) {
     (void)context;
     (void)fault;
     const char *name = NULL;
@@ -100,9 +102,9 @@ static const char *hornet_running_function(void *context, const char *fault) {
 #endif
 
 static void hornet_on_fault(int sig, siginfo_t *info, void *context) {
-    char *address = (char *)info->si_addr;
+    uintptr_t address = (uintptr_t)info->si_addr;
     // Memory in the stack's own range doesn't fault unless the stack has run out.
-    if (address >= hornet_stack_low - HORNET_BELOW_STACK && address < hornet_stack_high) {
+    if (address < hornet_stack_high && address + HORNET_BELOW_STACK >= hornet_stack_low) {
         static char rest[256];
         ssize_t written = write(2, HORNET_STACK_OVERFLOW, sizeof HORNET_STACK_OVERFLOW - 1);
         size_t length = hornet__stack_overflow_rest(rest, sizeof rest, hornet_running_function(context, address));
@@ -115,7 +117,7 @@ static void hornet_on_fault(int sig, siginfo_t *info, void *context) {
 
 void hornet__catch_stack_overflow(void) {
 #ifdef __APPLE__
-    hornet_stack_high = (char *)pthread_get_stackaddr_np(pthread_self());
+    hornet_stack_high = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
     hornet_stack_low = hornet_stack_high - pthread_get_stacksize_np(pthread_self());
 #else
     // The main thread's stack grows down from about here, to the size the system allows it.
@@ -124,8 +126,9 @@ void hornet__catch_stack_overflow(void) {
     if (getrlimit(RLIMIT_STACK, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) {
         return;  // no end to look for
     }
-    hornet_stack_high = &here + 4096;
-    hornet_stack_low = &here - limit.rlim_cur;
+    uintptr_t at = (uintptr_t)&here;
+    hornet_stack_high = at + 4096;
+    hornet_stack_low = limit.rlim_cur < at ? at - limit.rlim_cur : 0;
 #endif
     stack_t stack;
     memset(&stack, 0, sizeof stack);
