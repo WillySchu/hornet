@@ -4,7 +4,7 @@
 import pytest
 
 import semantic
-from typesys import SUM_TYPE_TAG_WIDTH, leaf_type, type_byte_width
+from typesys import SUM_PAYLOAD_OFFSET, leaf_type, type_byte_width
 
 
 def test_type_byte_width_int():
@@ -199,10 +199,10 @@ def test_type_byte_width_struct_with_self_referential_struct_array_field():
 
 
 def test_type_byte_width_sum_type_is_tag_plus_largest_variant():
-    """4 (tag) + 8 (Square's own width, the larger of the two) -- not
-    4 + 4 + 8 (the SUM of both variants, the way a struct's fields
-    would be), since only one variant is ever live at once and both
-    share the same payload space starting right after the tag."""
+    """8 (the tag, then the payload's offset) + 8 (Square's own width,
+    the larger of the two) -- not 8 + 4 + 8 (the SUM of both variants,
+    the way a struct's fields would be), since only one variant is ever
+    live at once and both share the same payload space."""
     structs = {
         'Circle': semantic.StructInfo(name='Circle', fields={'radius': semantic.Type(kind=semantic.TypeKind.INT32)}),
         'Square': semantic.StructInfo(name='Square', fields={'side': semantic.Type(kind=semantic.TypeKind.INT)}),
@@ -212,7 +212,7 @@ def test_type_byte_width_sum_type_is_tag_plus_largest_variant():
         semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Square'),
     ])}
     t = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
-    expected = SUM_TYPE_TAG_WIDTH + 8  # 4 + 8 = 12
+    expected = SUM_PAYLOAD_OFFSET + 8  # 8 + 8 = 16
     assert expected == type_byte_width(t, structs, sum_types)
 
 
@@ -229,7 +229,7 @@ def test_type_byte_width_sum_type_variant_order_does_not_affect_width():
         semantic.Type(kind=semantic.TypeKind.STRUCT, struct_name='Circle'),
     ])}
     t = semantic.Type(kind=semantic.TypeKind.SUM, sum_type_name='Shape')
-    expected = SUM_TYPE_TAG_WIDTH + 8
+    expected = SUM_PAYLOAD_OFFSET + 8
     assert expected == type_byte_width(t, structs, sum_types)
 
 

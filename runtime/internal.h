@@ -67,6 +67,20 @@ void *hornet__realloc(void *ptr, int64_t size);
 void *hornet_alloc(int64_t size);
 void *hornet_alloc_zeroed(int64_t count, int64_t size);
 
+// Where a sum's payload is: after its 4-byte tag, at 8 (typesys.py's SUM_PAYLOAD_OFFSET).
+#define HORNET_SUM_PAYLOAD_OFFSET 8
+
+// A dict's header, which every copy of the dict points to (typesys.py's DICT_HEADER_SIZE and its
+// fields). The compiled code writes the bucket layout when it makes the dict: the runtime goes by it.
+struct hornet_dict {
+    void *buckets;
+    int64_t count, tombstones, capacity;
+    int64_t key_offset, value_offset;  // where in a bucket, after its state byte, the key and value are
+    int64_t stride;  // how far apart buckets are
+};
+_Static_assert(sizeof(struct hornet_dict) == 56 && offsetof(struct hornet_dict, key_offset) == 32,
+               "a dict's header is as typesys.py has it");
+
 // Bucket state byte. Tombstones keep probe chains intact after deletion.
 #define HORNET_DICT_BUCKET_EMPTY 0
 #define HORNET_DICT_BUCKET_OCCUPIED 1
@@ -103,7 +117,8 @@ struct hornet_slice {
     int64_t cap;
 };
 
-// Unaligned reads: Hornet structs are packed.
+// Reads of what a value holds, wherever it is. (Hornet lays values out as C would, aligned; these
+// don't depend on it.)
 static inline int32_t read_i32(const void *addr) {
     int32_t value;
     memcpy(&value, addr, sizeof(value));

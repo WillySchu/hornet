@@ -94,23 +94,17 @@ void hornet__stringify(void *value_addr, const unsigned char *type_desc, int quo
             break;
         }
         case HORNET_TYPEDESC_DICT: {
-            // [tag, name, key_desc, key_width, value_desc, value_width]
+            // [tag, name, key_desc, key_width, value_desc, value_width]; the bucket layout is the header's.
             const char *name = (const char *)read_desc_word(type_desc, 1);
             const unsigned char *key_desc = (const unsigned char *)read_desc_word(type_desc, 2);
-            int64_t key_width = (int64_t)read_desc_word(type_desc, 3);
             const unsigned char *value_desc = (const unsigned char *)read_desc_word(type_desc, 4);
-            int64_t value_width = (int64_t)read_desc_word(type_desc, 5);
-            int64_t bucket_stride = 1 + key_width + value_width;
-
-            void *header = read_ptr(value_addr);  // a dict value points to its shared header
-            void *buckets = read_ptr(header);
-            int64_t capacity = read_i64((char *)header + 24);
+            const struct hornet_dict *dict = read_ptr(value_addr);  // a dict value points to its shared header
 
             hornet_buf_append_cstr(buf, name);
             hornet_buf_append_byte(buf, '{');
             int printed_any = 0;
-            for (int64_t i = 0; i < capacity; i++) {
-                unsigned char *bucket = (unsigned char *)buckets + i * bucket_stride;
+            for (int64_t i = 0; i < dict->capacity; i++) {
+                unsigned char *bucket = (unsigned char *)dict->buckets + i * dict->stride;
                 if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
                     continue;
                 }
@@ -118,9 +112,9 @@ void hornet__stringify(void *value_addr, const unsigned char *type_desc, int quo
                     hornet_buf_append_bytes(buf, ", ", 2);
                 }
                 printed_any = 1;
-                hornet__stringify(bucket + 1, key_desc, 1, buf);
+                hornet__stringify(bucket + dict->key_offset, key_desc, 1, buf);
                 hornet_buf_append_bytes(buf, ": ", 2);
-                hornet__stringify(bucket + 1 + key_width, value_desc, 1, buf);
+                hornet__stringify(bucket + dict->value_offset, value_desc, 1, buf);
             }
             hornet_buf_append_byte(buf, '}');
             break;
@@ -154,7 +148,7 @@ void hornet__stringify(void *value_addr, const unsigned char *type_desc, int quo
             int32_t discriminant = read_i32(value_addr);
             const unsigned char *variant_desc =
                 (const unsigned char *)read_desc_word(type_desc, 2 + discriminant);
-            void *payload_addr = (char *)value_addr + 4;
+            void *payload_addr = (char *)value_addr + HORNET_SUM_PAYLOAD_OFFSET;
             hornet__stringify(payload_addr, variant_desc, 1, buf);
             break;
         }

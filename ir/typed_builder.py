@@ -17,7 +17,10 @@ from ir.ir import (
     IRLocalAddress, IRMove, IRNullCheck, IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
 )
 from ops import BinaryOp, UnaryOp
-from typesys import SUM_TYPE_TAG_WIDTH, Type, TypeKind, type_byte_width
+from typesys import (
+    DICT_HEADER_SIZE, DICT_KEY_OFFSET_FIELD, DICT_STRIDE_FIELD, DICT_VALUE_OFFSET_FIELD, SUM_PAYLOAD_OFFSET, Type,
+    TypeKind, dict_bucket_layout, field_offsets, type_byte_width,
+)
 
 _SCALAR_KINDS = {TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8, TypeKind.BOOL,
                  TypeKind.POINTER, TypeKind.ENUM}
@@ -46,7 +49,6 @@ def _ported(type_: Type) -> bool:
 
 _PLACE_NODES = (t.Local, t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)
 _DICT_BUCKET_OCCUPIED = 1  # runtime/internal.h's HORNET_DICT_BUCKET_OCCUPIED
-_DICT_HEADER_SIZE = 32  # {buckets, count, tombstones, capacity}
 
 
 def _as_int32(value):
@@ -157,6 +159,16 @@ class TypedFunctionBuilder:
 
     def width(self, type_: Type) -> int:
         return type_byte_width(type_, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+
+    def field_offsets(self, struct_type: Type) -> dict:
+        """Each field's offset in a struct of `struct_type`, by name, in declaration order."""
+        registry = self.ir_program.struct_registry
+        return field_offsets(struct_type.struct_name, registry, self.ir_program.sum_type_registry)
+
+    def bucket_layout(self, dict_type: Type) -> tuple:
+        """(key offset, value offset, stride) of a `dict_type`'s buckets."""
+        return dict_bucket_layout(dict_type.key_type, dict_type.element_type, self.ir_program.struct_registry,
+                                  self.ir_program.sum_type_registry)
 
     def temp(self, type_: Type = Type.INT64):
         return self.ids.new_temp(type_)
@@ -534,7 +546,7 @@ class TypedFunctionBuilder:
             ir, base = self.address(e.sum)
             if isinstance(e.sum, t.Local) and e.sum.symbol.id in self.addressed:
                 ir = ir + self.variant_check(base, e)
-            offset_ir, address = self.offset(base, SUM_TYPE_TAG_WIDTH)
+            offset_ir, address = self.offset(base, SUM_PAYLOAD_OFFSET)
             return ir + offset_ir, address
         if isinstance(e, t.DictLookup):
             ir, address = self.dict_call(e.dict, e.key, 'lookup', result_type=Type.INT64)
@@ -553,12 +565,10 @@ class TypedFunctionBuilder:
 
     def field_offset(self, e: t.FieldAccess) -> int:
         struct_type = e.base.type.element_type if e.through_pointer else e.base.type
-        offset = 0
-        for name, field_type in self.ir_program.struct_registry[struct_type.struct_name].fields.items():
-            if name == e.name:
-                return offset
-            offset += self.width(field_type)
-        raise NotYetPorted(f"no field {e.name}")
+        offsets = self.field_offsets(struct_type)
+        if e.name not in offsets:
+            raise NotYetPorted(f"no field {e.name}")
+        return offsets[e.name]
 
     def element(self, base, index, element_type) -> tuple:
         """The address of element `index` (already bounds-checked) from `base`."""
@@ -614,12 +624,10 @@ class TypedFunctionBuilder:
             ir, source = self.address(e)
             return ir + [IRCopy(dst_address=dst, src_address=source, value_type=e.type)]
         if isinstance(e, t.StructLiteral):
-            ir, offset = [], 0
-            for (name, field_type), value in zip(
-                    self.ir_program.struct_registry[e.type.struct_name].fields.items(), e.fields):
+            ir = []
+            for offset, value in zip(self.field_offsets(e.type).values(), e.fields):
                 offset_ir, address = self.offset(dst, offset)
                 ir += offset_ir + self.store(address, value)
-                offset += self.width(field_type)
             return ir
         if isinstance(e, t.ArrayLiteral):
             ir, width = [], self.width(e.type.element_type)
@@ -632,7 +640,7 @@ class TypedFunctionBuilder:
             ir = [IRStore(address=dst, value=IRConst(variants.index(e.value.type), Type.INT32), value_type=Type.INT32)]
             if e.value.type == Type.NONE:
                 return ir
-            offset_ir, payload = self.offset(dst, SUM_TYPE_TAG_WIDTH)
+            offset_ir, payload = self.offset(dst, SUM_PAYLOAD_OFFSET)
             return ir + offset_ir + self.store(payload, e.value)
         if isinstance(e, t.WidenSum):
             return self.widen_sum(dst, e)
@@ -725,23 +733,20 @@ class TypedFunctionBuilder:
         if kind == TypeKind.SLICE:
             return self.write_slice(dst, IRConst(0, Type.INT64), IRConst(0, Type.INT), IRConst(0, Type.INT))
         if kind == TypeKind.STRUCT:
-            ir, offset = [], 0
-            for field_type in self.ir_program.struct_registry[type_.struct_name].fields.values():
+            ir = []
+            fields = self.ir_program.struct_registry[type_.struct_name].fields
+            for name, offset in self.field_offsets(type_).items():
                 offset_ir, address = self.offset(dst, offset)
-                ir += offset_ir + self.zero_into(address, field_type)
-                offset += self.width(field_type)
+                ir += offset_ir + self.zero_into(address, fields[name])
             return ir
         if kind == TypeKind.ARRAY:
             return self.zero_array(dst, type_)
-        if kind == TypeKind.DICT:  # a new empty dict
+        if kind == TypeKind.DICT:  # a new empty dict: no buckets yet, but where its buckets will hold what
             header = self.temp()
-            return [
-                IRCall(
-                    dst=header, name='hornet_alloc_zeroed',
-                    args=[IRConst(1, Type.INT64), IRConst(_DICT_HEADER_SIZE, Type.INT64)]
-                ),
-                IRStore(address=dst, value=header, value_type=Type.INT64),
-            ]
+            ir = [IRCall(dst=header, name='hornet_alloc_zeroed',
+                         args=[IRConst(1, Type.INT64), IRConst(DICT_HEADER_SIZE, Type.INT64)])]
+            return ir + self.write_bucket_layout(header, type_) + [
+                IRStore(address=dst, value=header, value_type=Type.INT64)]
         return [IRStore(address=dst, value=IRConst(0, type_), value_type=type_)]
 
     def zero_array(self, dst, type_: Type) -> list:
@@ -1429,8 +1434,7 @@ class TypedFunctionBuilder:
 
     def for_in_dict(self, s: t.ForIn) -> list:
         """Scan every bucket; a dict whose buckets are reallocated during the loop panics."""
-        dict_type = s.iterable.type
-        key_width, value_width = self.width(dict_type.key_type), self.width(dict_type.element_type)
+        key_offset, value_offset, stride = self.bucket_layout(s.iterable.type)
         ir, header = self.dict_header(s.iterable)
         buckets, capacity = self.temp(), self.temp()
         cap_ir, cap_address = self.offset(header, 24)
@@ -1449,17 +1453,17 @@ class TypedFunctionBuilder:
         ir += self.panic_when(moved, "for ... in: dict's own buckets were reallocated (e.g. by an insert that "
                                      "triggered growth) during iteration", s)
         ir += [
-            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(1 + key_width + value_width, Type.INT64)),
+            IRBinOp(dst=scaled, op=BinaryOp.MULTIPLY, left=i, right=IRConst(stride, Type.INT64)),
             IRBinOp(dst=bucket, op=BinaryOp.ADD, left=buckets, right=scaled),
             IRLoad(dst=state, address=bucket),
             IRBinOp(dst=occupied, op=BinaryOp.EQUAL, left=state, right=IRConst(_DICT_BUCKET_OCCUPIED, Type.UINT8)),
             IRBranch(cond=occupied, true_label=entry, false_label=step),
             IRLabel(entry),
         ]
-        key_ir, key_address = self.offset(bucket, 1)
+        key_ir, key_address = self.offset(bucket, key_offset)
         ir += key_ir + self.bind_from(s.bindings[0], key_address)
         if len(s.bindings) == 2:
-            value_ir, value_address = self.offset(key_address, key_width)
+            value_ir, value_address = self.offset(bucket, value_offset)
             ir += value_ir + self.bind_from(s.bindings[1], value_address)
         self.loops.append((step, end, len(self.deferred)))
         ir += self.block(s.body)
@@ -1506,21 +1510,36 @@ class TypedFunctionBuilder:
         call = IRCall(dst=result, name=f'hornet_dict_{operation}_{kind}_key', args=[header, *key_args, *extra])
         return [call], result
 
+    def write_bucket_layout(self, header, dict_type: Type) -> list:
+        """Store where a `dict_type`'s buckets hold the key and the value, and their stride, into its
+        header at `header`: the runtime goes by these."""
+        ir = []
+        for field, value in zip((DICT_KEY_OFFSET_FIELD, DICT_VALUE_OFFSET_FIELD, DICT_STRIDE_FIELD),
+                                self.bucket_layout(dict_type)):
+            offset_ir, address = self.offset(header, field)
+            ir += offset_ir + [IRStore(address=address, value=IRConst(value, Type.INT64), value_type=Type.INT64)]
+        return ir
+
     def dict_set(self, target: t.DictLookup, value_address) -> list:
         return self.dict_call(target.dict, target.key, 'set', extra=(value_address,))[0]
 
     def dict_literal(self, dst, e: t.DictLiteral) -> list:
-        """Build the table, insert each entry, then the header; `dst` gets the header pointer."""
+        """Build the header and its table, insert each entry, then set the count; `dst` gets the
+        header pointer."""
         key_type, value_type = e.type.key_type, e.type.element_type
         key_width, value_width = self.width(key_type), self.width(value_type)
-        stride = 1 + key_width + value_width
         capacity = 8
         while capacity < len(e.entries) * 2:
             capacity *= 2
         buckets, header, count = self.temp(), self.temp(), IRConst(0, Type.INT)
         ir = [IRCall(dst=buckets, name='hornet_alloc_zeroed',
-                     args=[IRConst(capacity, Type.INT64), IRConst(stride, Type.INT64)])]
-        table = [buckets, IRConst(capacity, Type.INT64), IRConst(stride, Type.INT64)]
+                     args=[IRConst(capacity, Type.INT64), IRConst(self.bucket_layout(e.type)[2], Type.INT64)]),
+              IRCall(dst=header, name='hornet_alloc_zeroed',
+                     args=[IRConst(1, Type.INT64), IRConst(DICT_HEADER_SIZE, Type.INT64)])]
+        for offset, value in ((0, buckets), (24, IRConst(capacity, Type.INT64))):
+            offset_ir, address = self.offset(header, offset)
+            ir += offset_ir + [IRStore(address=address, value=value, value_type=Type.INT64)]
+        ir += self.write_bucket_layout(header, e.type)
         for key, value in e.entries:
             value_ir, value_address = self.scratch_address(value_type)
             ir += value_ir + self.store(value_address, value)
@@ -1528,23 +1547,19 @@ class TypedFunctionBuilder:
             if key_type.kind == TypeKind.STR:
                 key_ir, ptr, length = self.str_value(key)
                 ir += key_ir + [IRCall(dst=inserted, name='hornet_dict_insert_str_key',
-                                       args=table + [ptr, length, value_address, IRConst(value_width, Type.INT64)])]
+                                       args=[header, ptr, length, value_address, IRConst(value_width, Type.INT64)])]
             else:
                 key_ir, key_address = self.scratch_address(key_type)
                 ir += key_ir + self.store(key_address, key) + [
                     IRCall(dst=inserted, name='hornet_dict_insert_scalar_key',
-                           args=table + [key_address, IRConst(key_width, Type.INT64), value_address,
-                                         IRConst(value_width, Type.INT64)])]
+                           args=[header, key_address, IRConst(key_width, Type.INT64), value_address,
+                                 IRConst(value_width, Type.INT64)])]
             total = self.temp(Type.INT)
             ir.append(IRBinOp(dst=total, op=BinaryOp.ADD, left=count, right=inserted))  # 1 for a new key
             count = total
-        fields = [(0, buckets, Type.INT64), (8, count, Type.INT), (16, IRConst(0, Type.INT), Type.INT),
-                  (24, IRConst(capacity, Type.INT64), Type.INT64)]
-        ir.append(IRCall(dst=header, name='hornet_alloc', args=[IRConst(_DICT_HEADER_SIZE, Type.INT64)]))
-        for offset, value, value_type_ in fields:
-            offset_ir, address = self.offset(header, offset)
-            ir += offset_ir + [IRStore(address=address, value=value, value_type=value_type_)]
-        return ir + [IRStore(address=dst, value=header, value_type=Type.INT64)]
+        count_ir, count_address = self.offset(header, 8)
+        return ir + count_ir + [IRStore(address=count_address, value=count, value_type=Type.INT),
+                                IRStore(address=dst, value=header, value_type=Type.INT64)]
 
     # -- slices
 
@@ -1676,12 +1691,12 @@ class TypedFunctionBuilder:
         """Fall through if the values at `left` and `right` are equal; jump to `mismatch` if not."""
         same = self.ids.new_label("eq_same")
         if type_.kind == TypeKind.STRUCT:
-            ir, offset = [], 0
-            for field_type in self.ir_program.struct_registry[type_.struct_name].fields.values():
+            ir = []
+            fields = self.ir_program.struct_registry[type_.struct_name].fields
+            for name, offset in self.field_offsets(type_).items():
                 l_ir, l = self.offset(left, offset)
                 r_ir, r = self.offset(right, offset)
-                ir += l_ir + r_ir + self.equal_or_jump(l, r, field_type, mismatch)
-                offset += self.width(field_type)
+                ir += l_ir + r_ir + self.equal_or_jump(l, r, fields[name], mismatch)
             return ir
         if type_.kind == TypeKind.ARRAY:
             ir = []
@@ -1695,8 +1710,8 @@ class TypedFunctionBuilder:
             # the tag. (The bytes can't be compared whole: those past the variant held mean nothing.)
             l_tag, r_tag, differs = self.temp(Type.INT32), self.temp(Type.INT32), self.temp(Type.BOOL)
             tags_same, done = self.ids.new_label("eq_tags_same"), self.ids.new_label("eq_sum_same")
-            l_ir, l_payload = self.offset(left, SUM_TYPE_TAG_WIDTH)
-            r_ir, r_payload = self.offset(right, SUM_TYPE_TAG_WIDTH)
+            l_ir, l_payload = self.offset(left, SUM_PAYLOAD_OFFSET)
+            r_ir, r_payload = self.offset(right, SUM_PAYLOAD_OFFSET)
             ir = [
                 IRLoad(dst=l_tag, address=left),
                 IRLoad(dst=r_tag, address=right),

@@ -297,6 +297,61 @@ static void test_nested_struct_field(void) {
     free(s);
 }
 
+// Fields of different alignments, padded between as C pads them: the descriptor's offsets are C's.
+static void test_padded_struct(void) {
+    uint64_t int8_desc[] = {HORNET_TYPEDESC_INT8};
+    uint64_t int_desc[] = {HORNET_TYPEDESC_INT};
+    uint64_t int32_desc[] = {HORNET_TYPEDESC_INT32};
+    struct padded {
+        int8_t a;
+        int64_t b;
+        int32_t c;
+    } value = {1, 2, 3};
+    uint64_t desc[] = {
+        HORNET_TYPEDESC_STRUCT, (uint64_t)"Padded", 3,
+        (uint64_t)"a", (uint64_t)int8_desc, offsetof(struct padded, a),
+        (uint64_t)"b", (uint64_t)int_desc, offsetof(struct padded, b),
+        (uint64_t)"c", (uint64_t)int32_desc, offsetof(struct padded, c),
+    };
+    char *s = stringify_to_cstr(&value, desc, 0);
+    CHECK_STR(s, "Padded(a: 1, b: 2, c: 3)");
+    free(s);
+}
+
+// A sum's payload is at HORNET_SUM_PAYLOAD_OFFSET, past its tag and padding.
+static void test_sum_payload(void) {
+    uint64_t int_desc[] = {HORNET_TYPEDESC_INT};
+    uint64_t int8_desc[] = {HORNET_TYPEDESC_INT8};
+    uint64_t sum_desc[] = {HORNET_TYPEDESC_SUM, 2, (uint64_t)int8_desc, (uint64_t)int_desc};
+    struct {
+        int32_t tag;
+        int64_t payload;
+    } value = {1, -5};
+    _Static_assert(HORNET_SUM_PAYLOAD_OFFSET == 8, "the payload is where C puts an int64 after an int32");
+    char *s = stringify_to_cstr(&value, sum_desc, 0);
+    CHECK_STR(s, "-5");
+    free(s);
+}
+
+// A dict printed by its header's bucket layout: an int8 key at 1, an int value at 8, 16 apart.
+static void test_dict_bucket_layout(void) {
+    uint64_t int8_desc[] = {HORNET_TYPEDESC_INT8};
+    uint64_t int_desc[] = {HORNET_TYPEDESC_INT};
+    uint64_t dict_desc[] = {HORNET_TYPEDESC_DICT, (uint64_t)"dict[int8]int", (uint64_t)int8_desc, 1,
+                            (uint64_t)int_desc, 8};
+    struct {
+        uint8_t state;
+        int8_t key;
+        int64_t value;
+    } buckets[4] = {{0, 0, 0}, {HORNET_DICT_BUCKET_OCCUPIED, 1, 10}, {HORNET_DICT_BUCKET_TOMBSTONE, 9, 90},
+                    {HORNET_DICT_BUCKET_OCCUPIED, 2, 20}};
+    struct hornet_dict header = {buckets, 2, 1, 4, 1, 8, sizeof buckets[0]};
+    struct hornet_dict *value = &header;
+    char *s = stringify_to_cstr(&value, dict_desc, 0);
+    CHECK_STR(s, "dict[int8]int{1: 10, 2: 20}");
+    free(s);
+}
+
 static void test_buffer_growth_stress(void) {
     // A large array forces many reallocations through the real
     // growth policy (starting from stringify_to_cstr's own
@@ -383,8 +438,8 @@ static void test_self_referential_struct(void) {
     node_desc_full[8] = 8;  // "children" offset, after the int
     children_slice_desc[2] = (uint64_t)node_desc_full;  // complete the cycle
 
-    // Packed, as Hornet lays structs out (these fields need no padding either way).
-    struct __attribute__((packed)) node_value {
+    // As Hornet lays the struct out: as C does.
+    struct node_value {
         int64_t value;
         void *children_ptr;
         int64_t children_len;
@@ -419,6 +474,9 @@ int main(void) {
     test_struct_with_slice_field();
     test_nested_struct_field();
     test_self_referential_struct();
+    test_padded_struct();
+    test_sum_payload();
+    test_dict_bucket_layout();
     test_buffer_growth_stress();
     test_hornet_print_end_to_end();
 

@@ -7,10 +7,12 @@ import pytest
 
 from build import c_compiler, executable_name, link_flags, runtime_objects
 from tests.targets import each_runnable_target, run_binary
+from typesys import Type, dict_bucket_layout
 
 pytestmark = pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not available")
 
-# A dict header is {buckets, count, tombstones, capacity}; prints `count capacity` per case.
+# A dict header is {buckets, count, tombstones, capacity, key offset, value offset, stride} (typesys.py's
+# dict_bucket_layout gives the last three); prints `count capacity` per case.
 _PROGRAM = r"""
 #include <stdint.h>
 #include <stdio.h>
@@ -24,7 +26,7 @@ void *hornet_dict_lookup_str_key(void *d, int64_t value_width, const void *key, 
 
 int main(void) {
     // Three entries stay; a hundred thousand others come and go.
-    int64_t scalar[4] = {0};
+    int64_t scalar[7] = {0, 0, 0, 0, 8, 16, 24};  // an int key and an int value
     for (int64_t i = -3; i < 100000; i++) {
         hornet_dict_set_scalar_key(scalar, 8, 8, &i, &i);
         if (i >= 0) {
@@ -35,7 +37,7 @@ int main(void) {
     printf("%lld %lld %lld\n", (long long)scalar[1], (long long)scalar[3],
            (long long)*(int64_t *)hornet_dict_lookup_scalar_key(scalar, 8, 8, &kept));
 
-    int64_t str[4] = {0};
+    int64_t str[7] = {0, 0, 0, 0, 8, 24, 32};  // a str key and an int value
     int64_t seven = 7;
     hornet_dict_set_str_key(str, 8, "keep", 4, &seven);
     for (int64_t i = 0; i < 100000; i++) {
@@ -48,7 +50,7 @@ int main(void) {
            (long long)*(int64_t *)hornet_dict_lookup_str_key(str, 8, "keep", 4));
 
     // A thousand live entries still grow the table.
-    int64_t full[4] = {0};
+    int64_t full[7] = {0, 0, 0, 0, 8, 16, 24};
     for (int64_t i = 0; i < 1000; i++) {
         hornet_dict_set_scalar_key(full, 8, 8, &i, &i);
     }
@@ -67,3 +69,8 @@ def test_capacity_follows_live_entries(target, tmp_path):
                    check=True, capture_output=True, text=True)
     result = run_binary(target, [binary], capture_output=True, text=True)
     assert (result.returncode, result.stdout) == (0, "3 8 -2\n1 8 7\n1000 2048\n")
+
+
+def test_the_layout_the_program_gives_is_typesys_s():
+    assert dict_bucket_layout(Type.INT, Type.INT, {}, {}) == (8, 16, 24)
+    assert dict_bucket_layout(Type.STR, Type.INT, {}, {}) == (8, 24, 32)

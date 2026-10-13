@@ -41,7 +41,6 @@ Updates:
 - float
 - Multithreading
 - `gen_array_copy` currently copies each leaf one by one, so for small leaf types (int8, etc.) this is calling many `movb` rather than a few `movq`.
-- Consider aligning struct storage rather than packing.
 - Bounds Check Elimination.
 - Interfaces.
 - Error handling.

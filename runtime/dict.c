@@ -12,99 +12,88 @@ int64_t hornet_hash_bytes(const void *ptr, int64_t len) {
     return (int64_t)h;
 }
 
-// Insert into a table with room (literals, and after any rehash): returns 0 if it overwrote the
-// key, 1 if the key is new, 2 if new in a tombstone's bucket.
-int64_t hornet_dict_insert_scalar_key(
-    void *buckets, int64_t capacity, int64_t bucket_stride,
-    const void *key_ptr, int64_t key_width,
-    const void *value_ptr, int64_t value_width
-) {
+// A bucket: a state byte, then the key and the value where the dict's header says (key_offset,
+// value_offset), `stride` bytes from the next. A str key is held as its {ptr, len}.
+
+// Insert into `buckets`, a table of `capacity` laid out as `dict` says, with room: 0 if it overwrote
+// the key, 1 if the key is new, 2 if new in a tombstone's bucket. (The probe loops keep the layout
+// in locals: the runtime is built without optimization, and these are the hot path.)
+static int64_t dict_insert_scalar(void *buckets, int64_t capacity, const struct hornet_dict *dict,
+                                  const void *key_ptr, int64_t key_width, const void *value_ptr, int64_t value_width) {
+    int64_t stride = dict->stride, key_offset = dict->key_offset, value_offset = dict->value_offset;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     int64_t tombstone_index = -1;
     while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        unsigned char *bucket = (unsigned char *)buckets + index * stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            int64_t target = (tombstone_index >= 0) ? tombstone_index : index;
-            unsigned char *target_bucket = (unsigned char *)buckets + target * bucket_stride;
-            target_bucket[0] = HORNET_DICT_BUCKET_OCCUPIED;
-            memcpy(target_bucket + 1, key_ptr, (size_t)key_width);
-            memcpy(target_bucket + 1 + key_width, value_ptr, (size_t)value_width);
+            int64_t at = tombstone_index >= 0 ? tombstone_index : index;
+            unsigned char *target = (unsigned char *)buckets + at * stride;
+            target[0] = HORNET_DICT_BUCKET_OCCUPIED;
+            memcpy(target + key_offset, key_ptr, (size_t)key_width);
+            memcpy(target + value_offset, value_ptr, (size_t)value_width);
             return (tombstone_index >= 0) ? 2 : 1;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_TOMBSTONE) {
             if (tombstone_index < 0) {
                 tombstone_index = index;
             }
-            index = (index + 1) & (capacity - 1);
-            continue;
-        }
-        if (memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
-            memcpy(bucket + 1 + key_width, value_ptr, (size_t)value_width);
+        } else if (memcmp(bucket + key_offset, key_ptr, (size_t)key_width) == 0) {
+            memcpy(bucket + value_offset, value_ptr, (size_t)value_width);
             return 0;
         }
         index = (index + 1) & (capacity - 1);
     }
 }
 
-// Str-keyed insert; the bucket stores the key's {ptr, len}.
-int64_t hornet_dict_insert_str_key(
-    void *buckets, int64_t capacity, int64_t bucket_stride,
-    const void *key_ptr, int64_t key_len,
-    const void *value_ptr, int64_t value_width
-) {
-    // type_byte_width(str)
-    const int64_t key_region_width = 16;
+// A str key as its bucket holds it.
+struct dict_str_key {
+    const void *ptr;
+    int64_t len;
+};
+
+static int64_t dict_insert_str(void *buckets, int64_t capacity, const struct hornet_dict *dict,
+                               const void *key_ptr, int64_t key_len, const void *value_ptr, int64_t value_width) {
+    int64_t stride = dict->stride, key_offset = dict->key_offset, value_offset = dict->value_offset;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     int64_t tombstone_index = -1;
     while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        unsigned char *bucket = (unsigned char *)buckets + index * stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            int64_t target = (tombstone_index >= 0) ? tombstone_index : index;
-            unsigned char *target_bucket = (unsigned char *)buckets + target * bucket_stride;
-            target_bucket[0] = HORNET_DICT_BUCKET_OCCUPIED;
-            *(void **)(target_bucket + 1) = (void *)key_ptr;
-            *(int64_t *)(target_bucket + 1 + sizeof(void *)) = key_len;
-            memcpy(target_bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
+            int64_t at = tombstone_index >= 0 ? tombstone_index : index;
+            unsigned char *target = (unsigned char *)buckets + at * stride;
+            struct dict_str_key key = {key_ptr, key_len};
+            target[0] = HORNET_DICT_BUCKET_OCCUPIED;
+            memcpy(target + key_offset, &key, sizeof key);
+            memcpy(target + value_offset, value_ptr, (size_t)value_width);
             return (tombstone_index >= 0) ? 2 : 1;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_TOMBSTONE) {
             if (tombstone_index < 0) {
                 tombstone_index = index;
             }
-            index = (index + 1) & (capacity - 1);
-            continue;
-        }
-        void *stored_ptr = *(void **)(bucket + 1);
-        int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
-        if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
-            memcpy(bucket + 1 + key_region_width, value_ptr, (size_t)value_width);
-            return 0;
+        } else {
+            struct dict_str_key stored;
+            memcpy(&stored, bucket + key_offset, sizeof stored);
+            if (stored.len == key_len && memcmp(stored.ptr, key_ptr, (size_t)key_len) == 0) {
+                memcpy(bucket + value_offset, value_ptr, (size_t)value_width);
+                return 0;
+            }
         }
         index = (index + 1) & (capacity - 1);
     }
 }
 
-// Descriptor fields (8 bytes each): buckets @0, count @8, tombstones @16, capacity @24.
-static void *dict_buckets(void *descriptor) { return read_ptr(descriptor); }
-static int64_t dict_capacity(void *descriptor) { return read_i64((char *)descriptor + 24); }
-
-static void dict_set_buckets(void *descriptor, void *buckets) {
-    *(void **)descriptor = buckets;
-}
-static void dict_set_capacity(void *descriptor, int64_t capacity) {
-    *(int64_t *)((char *)descriptor + 24) = capacity;
-}
-static void dict_bump_count(void *descriptor) {
-    int64_t *count = (int64_t *)((char *)descriptor + 8);
-    *count += 1;
+// Insert into a dict whose table has room (a literal's): as dict_insert_scalar. The caller counts.
+int64_t hornet_dict_insert_scalar_key(void *descriptor, const void *key_ptr, int64_t key_width,
+                                      const void *value_ptr, int64_t value_width) {
+    struct hornet_dict *dict = descriptor;
+    return dict_insert_scalar(dict->buckets, dict->capacity, dict, key_ptr, key_width, value_ptr, value_width);
 }
 
-static int64_t dict_tombstones(void *descriptor) { return read_i64((char *)descriptor + 16); }
-static void dict_set_tombstones(void *descriptor, int64_t tombstones) {
-    *(int64_t *)((char *)descriptor + 16) = tombstones;
-}
-static void dict_bump_tombstones(void *descriptor, int64_t delta) {
-    dict_set_tombstones(descriptor, dict_tombstones(descriptor) + delta);
+int64_t hornet_dict_insert_str_key(void *descriptor, const void *key_ptr, int64_t key_len,
+                                   const void *value_ptr, int64_t value_width) {
+    struct hornet_dict *dict = descriptor;
+    return dict_insert_str(dict->buckets, dict->capacity, dict, key_ptr, key_len, value_ptr, value_width);
 }
 
 // A rehash's capacity: 8 for a dict's first write; unchanged when at most half the buckets would
@@ -116,58 +105,42 @@ static int64_t dict_rehash_capacity(int64_t capacity, int64_t count) {
     return (count + 1) * 2 <= capacity ? capacity : capacity * 2;
 }
 
-// Rehash the live buckets into a new table once (count + tombstones + 1) exceeds 75%.
-static void dict_grow_scalar_key_if_needed(void *descriptor, int64_t key_width, int64_t value_width) {
-    int64_t capacity = dict_capacity(descriptor);
-    int64_t count = read_i64((char *)descriptor + 8);
-    int64_t tombstones = dict_tombstones(descriptor);
-    if ((count + tombstones + 1) * 4 <= capacity * 3) {
+// Rehash the live buckets into a new table once (count + tombstones + 1) exceeds 75%. A str key is
+// given as -1 for `key_width`.
+static void dict_grow_if_needed(struct hornet_dict *dict, int64_t key_width, int64_t value_width) {
+    if ((dict->count + dict->tombstones + 1) * 4 <= dict->capacity * 3) {
         return;
     }
-    int64_t bucket_stride = 1 + key_width + value_width;
-    int64_t new_capacity = dict_rehash_capacity(capacity, count);
-    void *new_buckets = hornet_alloc_zeroed(new_capacity, bucket_stride);
-    void *old_buckets = dict_buckets(descriptor);
-    for (int64_t i = 0; i < capacity; i++) {
-        unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
+    int64_t new_capacity = dict_rehash_capacity(dict->capacity, dict->count);
+    void *new_buckets = hornet_alloc_zeroed(new_capacity, dict->stride);
+    for (int64_t i = 0; i < dict->capacity; i++) {
+        unsigned char *bucket = (unsigned char *)dict->buckets + i * dict->stride;
         if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
             continue;
         }
-        hornet_dict_insert_scalar_key(
-            new_buckets, new_capacity, bucket_stride,
-            bucket + 1, key_width, bucket + 1 + key_width, value_width);
+        if (key_width < 0) {
+            struct dict_str_key key;
+            memcpy(&key, bucket + dict->key_offset, sizeof key);
+            dict_insert_str(new_buckets, new_capacity, dict, key.ptr, key.len, bucket + dict->value_offset,
+                            value_width);
+        } else {
+            dict_insert_scalar(new_buckets, new_capacity, dict, bucket + dict->key_offset, key_width,
+                               bucket + dict->value_offset, value_width);
+        }
     }
-    dict_set_buckets(descriptor, new_buckets);
-    dict_set_capacity(descriptor, new_capacity);
-    dict_set_tombstones(descriptor, 0);
+    dict->buckets = new_buckets;
+    dict->capacity = new_capacity;
+    dict->tombstones = 0;
 }
 
-static void dict_grow_str_key_if_needed(void *descriptor, int64_t value_width) {
-    const int64_t key_region_width = 16;  // type_byte_width(str)
-    int64_t capacity = dict_capacity(descriptor);
-    int64_t count = read_i64((char *)descriptor + 8);
-    int64_t tombstones = dict_tombstones(descriptor);
-    if ((count + tombstones + 1) * 4 <= capacity * 3) {
-        return;
+// What an insert into a dict's own table did to its count and tombstones.
+static void dict_note_insert(struct hornet_dict *dict, int64_t result) {
+    if (result != 0) {
+        dict->count += 1;
     }
-    int64_t bucket_stride = 1 + key_region_width + value_width;
-    int64_t new_capacity = dict_rehash_capacity(capacity, count);
-    void *new_buckets = hornet_alloc_zeroed(new_capacity, bucket_stride);
-    void *old_buckets = dict_buckets(descriptor);
-    for (int64_t i = 0; i < capacity; i++) {
-        unsigned char *bucket = (unsigned char *)old_buckets + i * bucket_stride;
-        if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
-            continue;
-        }
-        void *stored_ptr = *(void **)(bucket + 1);
-        int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
-        hornet_dict_insert_str_key(
-            new_buckets, new_capacity, bucket_stride,
-            stored_ptr, stored_len, bucket + 1 + key_region_width, value_width);
+    if (result == 2) {
+        dict->tombstones -= 1;
     }
-    dict_set_buckets(descriptor, new_buckets);
-    dict_set_capacity(descriptor, new_capacity);
-    dict_set_tombstones(descriptor, 0);
 }
 
 // `d[k] = v`: grow if needed, then insert.
@@ -175,35 +148,20 @@ void hornet_dict_set_scalar_key(
     void *descriptor, int64_t key_width, int64_t value_width,
     const void *key_ptr, const void *value_ptr
 ) {
-    dict_grow_scalar_key_if_needed(descriptor, key_width, value_width);
-    int64_t bucket_stride = 1 + key_width + value_width;
-    int result = hornet_dict_insert_scalar_key(
-        dict_buckets(descriptor), dict_capacity(descriptor), bucket_stride,
-        key_ptr, key_width, value_ptr, value_width);
-    if (result != 0) {
-        dict_bump_count(descriptor);
-    }
-    if (result == 2) {
-        dict_bump_tombstones(descriptor, -1);
-    }
+    struct hornet_dict *dict = descriptor;
+    dict_grow_if_needed(dict, key_width, value_width);
+    dict_note_insert(dict, dict_insert_scalar(dict->buckets, dict->capacity, dict, key_ptr, key_width, value_ptr,
+                                              value_width));
 }
 
 void hornet_dict_set_str_key(
     void *descriptor, int64_t value_width,
     const void *key_ptr, int64_t key_len, const void *value_ptr
 ) {
-    dict_grow_str_key_if_needed(descriptor, value_width);
-    const int64_t key_region_width = 16;
-    int64_t bucket_stride = 1 + key_region_width + value_width;
-    int result = hornet_dict_insert_str_key(
-        dict_buckets(descriptor), dict_capacity(descriptor), bucket_stride,
-        key_ptr, key_len, value_ptr, value_width);
-    if (result != 0) {
-        dict_bump_count(descriptor);
-    }
-    if (result == 2) {
-        dict_bump_tombstones(descriptor, -1);
-    }
+    struct hornet_dict *dict = descriptor;
+    dict_grow_if_needed(dict, -1, value_width);
+    dict_note_insert(dict, dict_insert_str(dict->buckets, dict->capacity, dict, key_ptr, key_len, value_ptr,
+                                           value_width));
 }
 
 // `d[k]`: address of the value, or NULL if the key is missing (the compiled code panics, with the
@@ -254,162 +212,111 @@ void hornet_panic_missing_key(const char *msg, const unsigned char *key_desc) {
     abort();
 }
 
-void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
-    void *buckets = dict_buckets(descriptor);
-    int64_t capacity = dict_capacity(descriptor);
+// The bucket holding the key, or NULL. (The probe loops keep the layout in locals: the runtime is
+// built without optimization, and these are the hot path.)
+static unsigned char *dict_find_scalar(const struct hornet_dict *dict, int64_t key_width, const void *key_ptr) {
+    int64_t capacity = dict->capacity;
     if (capacity == 0) {
-        // no table yet: capacity 0 would break the mask.
-        hornet_note_missing_key(key_ptr);
-        return NULL;
+        return NULL;  // no table yet: capacity 0 would break the mask
     }
-    int64_t bucket_stride = 1 + key_width + value_width;
+    unsigned char *buckets = dict->buckets;
+    int64_t stride = dict->stride, key_offset = dict->key_offset;
     int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
     while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        unsigned char *bucket = buckets + index * stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_note_missing_key(key_ptr);
             return NULL;
         }
-        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
-            return bucket + 1 + key_width;
+        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + key_offset, key_ptr, (size_t)key_width) == 0) {
+            return bucket;
         }
         index = (index + 1) & (capacity - 1);
     }
 }
 
-void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
-    const int64_t key_region_width = 16;
-    void *buckets = dict_buckets(descriptor);
-    int64_t capacity = dict_capacity(descriptor);
+static unsigned char *dict_find_str(const struct hornet_dict *dict, const void *key_ptr, int64_t key_len) {
+    int64_t capacity = dict->capacity;
     if (capacity == 0) {
-        // no table yet
-        hornet_note_missing_str_key(key_ptr, key_len);
         return NULL;
     }
-    int64_t bucket_stride = 1 + key_region_width + value_width;
+    unsigned char *buckets = dict->buckets;
+    int64_t stride = dict->stride, key_offset = dict->key_offset;
     int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
     while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
+        unsigned char *bucket = buckets + index * stride;
         if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_note_missing_str_key(key_ptr, key_len);
             return NULL;
         }
         if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
-            void *stored_ptr = *(void **)(bucket + 1);
-            int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
-            if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
-                return bucket + 1 + key_region_width;
+            struct dict_str_key stored;
+            memcpy(&stored, bucket + key_offset, sizeof stored);
+            if (stored.len == key_len && memcmp(stored.ptr, key_ptr, (size_t)key_len) == 0) {
+                return bucket;
             }
         }
         index = (index + 1) & (capacity - 1);
     }
+}
+
+void *hornet_dict_lookup_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+    (void)value_width;
+    const struct hornet_dict *dict = descriptor;
+    unsigned char *bucket = dict_find_scalar(dict, key_width, key_ptr);
+    if (bucket == NULL) {
+        hornet_note_missing_key(key_ptr);
+        return NULL;
+    }
+    return bucket + dict->value_offset;
+}
+
+void *hornet_dict_lookup_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
+    (void)value_width;
+    const struct hornet_dict *dict = descriptor;
+    unsigned char *bucket = dict_find_str(dict, key_ptr, key_len);
+    if (bucket == NULL) {
+        hornet_note_missing_str_key(key_ptr, key_len);
+        return NULL;
+    }
+    return bucket + dict->value_offset;
 }
 
 // `k in d`.
 int64_t hornet_dict_contains_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
-    void *buckets = dict_buckets(descriptor);
-    int64_t capacity = dict_capacity(descriptor);
-    if (capacity == 0) {
-        // no table yet
-        return 0;
-    }
-    int64_t bucket_stride = 1 + key_width + value_width;
-    int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
-    while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            return 0;
-        }
-        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
-            return 1;
-        }
-        index = (index + 1) & (capacity - 1);
-    }
+    (void)value_width;
+    return dict_find_scalar(descriptor, key_width, key_ptr) != NULL;
 }
 
 int64_t hornet_dict_contains_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
-    const int64_t key_region_width = 16;
-    void *buckets = dict_buckets(descriptor);
-    int64_t capacity = dict_capacity(descriptor);
-    if (capacity == 0) {
-        // no table yet
-        return 0;
-    }
-    int64_t bucket_stride = 1 + key_region_width + value_width;
-    int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
-    while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            return 0;
-        }
-        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
-            void *stored_ptr = *(void **)(bucket + 1);
-            int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
-            if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
-                return 1;
-            }
-        }
-        index = (index + 1) & (capacity - 1);
-    }
+    (void)value_width;
+    return dict_find_str(descriptor, key_ptr, key_len) != NULL;
 }
 
 // `del(d, k)`: mark a tombstone and return 1, or return 0 if the key is missing (the compiled code
 // panics, with the source position).
-int64_t hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
-    void *buckets = dict_buckets(descriptor);
-    int64_t capacity = dict_capacity(descriptor);
-    if (capacity == 0) {
-        // no table yet
-        hornet_note_missing_key(key_ptr);
+static int64_t dict_delete(struct hornet_dict *dict, unsigned char *bucket) {
+    if (bucket == NULL) {
         return 0;
     }
-    int64_t bucket_stride = 1 + key_width + value_width;
-    int64_t index = hornet_hash_bytes(key_ptr, key_width) & (capacity - 1);
-    while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_note_missing_key(key_ptr);
-            return 0;
-        }
-        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED && memcmp(bucket + 1, key_ptr, (size_t)key_width) == 0) {
-            bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
-            int64_t *count = (int64_t *)((char *)descriptor + 8);
-            *count -= 1;
-            dict_bump_tombstones(descriptor, 1);
-            return 1;
-        }
-        index = (index + 1) & (capacity - 1);
+    bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
+    dict->count -= 1;
+    dict->tombstones += 1;
+    return 1;
+}
+
+int64_t hornet_dict_delete_scalar_key(void *descriptor, int64_t key_width, int64_t value_width, const void *key_ptr) {
+    (void)value_width;
+    int64_t deleted = dict_delete(descriptor, dict_find_scalar(descriptor, key_width, key_ptr));
+    if (!deleted) {
+        hornet_note_missing_key(key_ptr);
     }
+    return deleted;
 }
 
 int64_t hornet_dict_delete_str_key(void *descriptor, int64_t value_width, const void *key_ptr, int64_t key_len) {
-    const int64_t key_region_width = 16;
-    void *buckets = dict_buckets(descriptor);
-    int64_t capacity = dict_capacity(descriptor);
-    if (capacity == 0) {
-        // no table yet
+    (void)value_width;
+    int64_t deleted = dict_delete(descriptor, dict_find_str(descriptor, key_ptr, key_len));
+    if (!deleted) {
         hornet_note_missing_str_key(key_ptr, key_len);
-        return 0;
     }
-    int64_t bucket_stride = 1 + key_region_width + value_width;
-    int64_t index = hornet_hash_bytes(key_ptr, key_len) & (capacity - 1);
-    while (1) {
-        unsigned char *bucket = (unsigned char *)buckets + index * bucket_stride;
-        if (bucket[0] == HORNET_DICT_BUCKET_EMPTY) {
-            hornet_note_missing_str_key(key_ptr, key_len);
-            return 0;
-        }
-        if (bucket[0] == HORNET_DICT_BUCKET_OCCUPIED) {
-            void *stored_ptr = *(void **)(bucket + 1);
-            int64_t stored_len = read_i64(bucket + 1 + sizeof(void *));
-            if (stored_len == key_len && memcmp(stored_ptr, key_ptr, (size_t)key_len) == 0) {
-                bucket[0] = HORNET_DICT_BUCKET_TOMBSTONE;
-                int64_t *count = (int64_t *)((char *)descriptor + 8);
-                *count -= 1;
-                dict_bump_tombstones(descriptor, 1);
-                return 1;
-            }
-        }
-        index = (index + 1) & (capacity - 1);
-    }
+    return deleted;
 }

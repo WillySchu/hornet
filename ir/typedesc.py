@@ -1,7 +1,7 @@
 """Type descriptors: static data describing a type, which the runtime's printer (runtime/format.c) walks."""
 
 from ir.errors import IRError
-from typesys import Type, TypeKind, type_byte_width
+from typesys import Type, TypeKind, field_offsets, type_byte_width
 
 # Kind tags; the source of truth for runtime/generate_typedesc_header.py.
 _TYPEDESC_INT = 0
@@ -60,13 +60,13 @@ def type_descriptor(ir_program, t: Type, in_progress: dict = None) -> str:
             width(t.element_type),
         ]
     elif t.kind == TypeKind.STRUCT:
-        words, offset = [_TYPEDESC_STRUCT, name(), len(structs[t.struct_name].fields)], 0
+        words = [_TYPEDESC_STRUCT, name(), len(structs[t.struct_name].fields)]
+        offsets = field_offsets(t.struct_name, structs, sums)
         for field_name, field_type in structs[t.struct_name].fields.items():
             field_label = ids.new_label("typedesc_fname")
             ir_program.string_literals.append((field_label, field_name))
-            words += [field_label, type_descriptor(ir_program, field_type, in_progress), offset]
-            offset += width(field_type)
-    elif t.kind == TypeKind.SUM:  # [tag, variant count, variant descriptors...]
+            words += [field_label, type_descriptor(ir_program, field_type, in_progress), offsets[field_name]]
+    elif t.kind == TypeKind.SUM:  # [tag, variant count, variant descriptors...]; the payload at SUM_PAYLOAD_OFFSET
         variants = sums[t.sum_type_name].variants
         words = [_TYPEDESC_SUM, len(variants)] + [type_descriptor(ir_program, v, in_progress) for v in variants]
     elif t.kind == TypeKind.NONE:
@@ -81,6 +81,7 @@ def type_descriptor(ir_program, t: Type, in_progress: dict = None) -> str:
     elif t.kind == TypeKind.POINTER:  # printed as an address
         words = [_TYPEDESC_POINTER]
     elif t.kind == TypeKind.DICT:  # [tag, name, key descriptor, key width, value descriptor, value width]
+        # (Where a bucket holds the key and the value is in the dict's own header.)
         words = [_TYPEDESC_DICT, name(), type_descriptor(ir_program, t.key_type, in_progress), width(t.key_type),
                  type_descriptor(ir_program, t.element_type, in_progress), width(t.element_type)]
     else:
