@@ -106,9 +106,10 @@ SUM_TYPE_TAG_WIDTH = 4
 SUM_PAYLOAD_OFFSET = 8
 
 # A dict's header (runtime/internal.h's struct hornet_dict): the buckets, count, tombstones, and
-# capacity, then where a bucket's key and value are and how far apart buckets are.
-DICT_HEADER_SIZE = 56
-DICT_KEY_OFFSET_FIELD, DICT_VALUE_OFFSET_FIELD, DICT_STRIDE_FIELD = 32, 40, 48
+# capacity, then where a bucket's key and value are, how far apart buckets are, and whether a bucket
+# may hold a pointer.
+DICT_HEADER_SIZE = 64
+DICT_KEY_OFFSET_FIELD, DICT_VALUE_OFFSET_FIELD, DICT_STRIDE_FIELD, DICT_HOLDS_POINTERS_FIELD = 32, 40, 48, 56
 
 
 def _rounded(n: int, alignment: int) -> int:
@@ -129,6 +130,22 @@ def type_alignment(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> 
     if t.kind == TypeKind.NONE:
         return 1
     return type_byte_width(t, structs, sum_types)  # a scalar, a pointer, or a dict
+
+
+def holds_pointers(t: Type, structs: dict[str, StructInfo], sum_types: dict) -> bool:
+    """Whether storage of `t` may hold a pointer: a str's, a slice's, a dict's, or a pointer; or
+    something that has one of those in it (a sum, in any of its variants, whichever it holds). Memory
+    that holds none is allocated as such (`_atomic`), so that a collector need not look through it.
+    (What a str or a slice points to is another matter: a str's bytes, a []int's elements hold none.)"""
+    if t.kind in (TypeKind.STR, TypeKind.SLICE, TypeKind.DICT, TypeKind.POINTER):
+        return True
+    if t.kind == TypeKind.ARRAY:
+        return holds_pointers(t.element_type, structs, sum_types)
+    if t.kind == TypeKind.STRUCT:
+        return any(holds_pointers(f, structs, sum_types) for f in structs[t.struct_name].fields.values())
+    if t.kind == TypeKind.SUM:
+        return any(holds_pointers(v, structs, sum_types) for v in sum_types[t.sum_type_name].variants)
+    return False
 
 
 def field_offsets(struct_name: str, structs: dict[str, StructInfo], sum_types: dict) -> dict[str, int]:

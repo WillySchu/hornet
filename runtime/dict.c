@@ -112,7 +112,8 @@ static void dict_grow_if_needed(struct hornet_dict *dict, int64_t key_width, int
         return;
     }
     int64_t new_capacity = dict_rehash_capacity(dict->capacity, dict->count);
-    void *new_buckets = hornet_alloc_zeroed(new_capacity, dict->stride);
+    void *new_buckets = dict->holds_pointers ? hornet_alloc_zeroed(new_capacity, dict->stride)
+                                             : hornet_alloc_zeroed_atomic(new_capacity, dict->stride);
     for (int64_t i = 0; i < dict->capacity; i++) {
         unsigned char *bucket = (unsigned char *)dict->buckets + i * dict->stride;
         if (bucket[0] != HORNET_DICT_BUCKET_OCCUPIED) {
@@ -190,10 +191,7 @@ static void hornet_note_missing_str_key(const void *key_ptr, int64_t key_len) {
 
 // `msg: key`, the key as print shows one inside a value: `d[k]` or `del(d, k)` without the key.
 void hornet_panic_missing_key(const char *msg, const unsigned char *key_desc) {
-    struct hornet_buf buf;
-    buf.cap = 64;
-    buf.ptr = hornet_alloc(buf.cap);
-    buf.len = 0;
+    struct hornet_buf buf = {hornet__scratch_alloc(64), 0, 64, 1};
     hornet_buf_append_cstr(&buf, msg);
     hornet_buf_append_cstr(&buf, ": ");
     if (read_desc_word(key_desc, 0) == HORNET_TYPEDESC_STR && hornet_missing_str_key.len > HORNET_PANIC_KEY_BYTES) {

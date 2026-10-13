@@ -18,8 +18,8 @@ from ir.ir import (
 )
 from ops import BinaryOp, UnaryOp
 from typesys import (
-    DICT_HEADER_SIZE, DICT_KEY_OFFSET_FIELD, DICT_STRIDE_FIELD, DICT_VALUE_OFFSET_FIELD, SUM_PAYLOAD_OFFSET, Type,
-    TypeKind, dict_bucket_layout, field_offsets, type_byte_width,
+    DICT_HEADER_SIZE, DICT_HOLDS_POINTERS_FIELD, DICT_KEY_OFFSET_FIELD, DICT_STRIDE_FIELD, DICT_VALUE_OFFSET_FIELD,
+    SUM_PAYLOAD_OFFSET, Type, TypeKind, dict_bucket_layout, field_offsets, holds_pointers, type_byte_width,
 )
 
 _SCALAR_KINDS = {TypeKind.INT, TypeKind.INT32, TypeKind.INT8, TypeKind.UINT8, TypeKind.BOOL,
@@ -48,6 +48,7 @@ def _ported(type_: Type) -> bool:
 
 
 _PLACE_NODES = (t.Local, t.Deref, t.FieldAccess, t.ArrayIndex, t.SliceIndex, t.Payload, t.DictLookup)
+_FORMAT_BUFFER_SIZE = 32  # runtime/internal.h's struct hornet_buf, which format(...) builds a str in
 _DICT_BUCKET_OCCUPIED = 1  # runtime/internal.h's HORNET_DICT_BUCKET_OCCUPIED
 
 
@@ -165,6 +166,26 @@ class TypedFunctionBuilder:
         registry = self.ir_program.struct_registry
         return field_offsets(struct_type.struct_name, registry, self.ir_program.sum_type_registry)
 
+    def holds_pointers(self, type_: Type) -> bool:
+        """Whether storage of `type_` may hold a pointer (typesys.holds_pointers)."""
+        return holds_pointers(type_, self.ir_program.struct_registry, self.ir_program.sum_type_registry)
+
+    # -- allocating: every allocation the compiled code makes is one of these two calls, so that each
+    #    says whether its memory may hold a pointer (a collector need not look through what holds none)
+
+    def allocation(self, dst, size, holds: bool, count=None) -> IRCall:
+        """A call giving `dst` new memory: `size` bytes, uninitialized; or with `count`, that many
+        items of `size` bytes, all zero. `holds`: whether it may hold a pointer."""
+        size, count = (IRConst(n, Type.INT64) if isinstance(n, int) else n for n in (size, count))
+        name = 'hornet_alloc' if count is None else 'hornet_alloc_zeroed'
+        args = [size] if count is None else [count, size]
+        return IRCall(dst=dst, name=name if holds else f'{name}_atomic', args=args)
+
+    def slice_growth(self, dst, element_type: Type, args: list) -> IRCall:
+        """A call giving `dst` a slice's grown backing store (hornet_slice_grow's `args`)."""
+        name = 'hornet_slice_grow' if self.holds_pointers(element_type) else 'hornet_slice_grow_atomic'
+        return IRCall(dst=dst, name=name, args=args)
+
     def bucket_layout(self, dict_type: Type) -> tuple:
         """(key offset, value offset, stride) of a `dict_type`'s buckets."""
         return dict_bucket_layout(dict_type.key_type, dict_type.element_type, self.ir_program.struct_registry,
@@ -186,7 +207,8 @@ class TypedFunctionBuilder:
         address = self.temp()
         registry = self.ir_program
         if literal_on_heap(literal, self.heap_ids, registry.struct_registry, registry.sum_type_registry):
-            return [IRCall(dst=address, name='hornet_alloc', args=[IRConst(size, Type.INT64)])], address
+            held = literal.type.element_type if isinstance(literal, t.SliceLiteral) else literal.type
+            return [self.allocation(address, size, self.holds_pointers(held))], address
         slot = self.ids.new_slot(size, "literal", self.ir_fn)
         return [IRLocalAddress(dst=address, slot=slot)], address
 
@@ -195,7 +217,7 @@ class TypedFunctionBuilder:
         stack."""
         address = self.temp()
         if is_heap_allocated(type_, self.ir_program.struct_registry, self.ir_program.sum_type_registry):
-            return [IRCall(dst=address, name='hornet_alloc', args=[IRConst(self.width(type_), Type.INT64)])], address
+            return [self.allocation(address, self.width(type_), self.holds_pointers(type_))], address
         slot = self.ids.new_slot(self.width(type_), "temporary", self.ir_fn)
         return [IRLocalAddress(dst=address, slot=slot)], address
 
@@ -237,7 +259,7 @@ class TypedFunctionBuilder:
         """A composite variable on the heap: new storage, its pointer kept in the variable's slot."""
         pointer, slot_address = self.temp(), self.temp()
         return [
-            IRCall(dst=pointer, name='hornet_alloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
+            self.allocation(pointer, self.width(symbol.type), self.holds_pointers(symbol.type)),
             IRLocalAddress(dst=slot_address, slot=self.ir_fn.var_slots[symbol.id]),
             IRStore(address=slot_address, value=pointer, value_type=Type.INT64)
         ]
@@ -258,7 +280,7 @@ class TypedFunctionBuilder:
             return [IRMove(dst=temp, src=value)]
         box = self.temp()
         return [
-            IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(symbol.type), Type.INT64)]),
+            self.allocation(box, self.width(symbol.type), self.holds_pointers(symbol.type)),
             IRStore(address=box, value=value, value_type=symbol.type),
             IRMove(dst=temp, src=box)
         ]
@@ -743,8 +765,7 @@ class TypedFunctionBuilder:
             return self.zero_array(dst, type_)
         if kind == TypeKind.DICT:  # a new empty dict: no buckets yet, but where its buckets will hold what
             header = self.temp()
-            ir = [IRCall(dst=header, name='hornet_alloc_zeroed',
-                         args=[IRConst(1, Type.INT64), IRConst(DICT_HEADER_SIZE, Type.INT64)])]
+            ir = [self.allocation(header, DICT_HEADER_SIZE, True, count=1)]  # (it points to the buckets)
             return ir + self.write_bucket_layout(header, type_) + [
                 IRStore(address=dst, value=header, value_type=Type.INT64)]
         return [IRStore(address=dst, value=IRConst(0, type_), value_type=type_)]
@@ -836,7 +857,7 @@ class TypedFunctionBuilder:
             size, ptr = self.temp(Type.INT), self.temp()
             return slice_ir + [
                 IRBinOp(dst=size, op=BinaryOp.BITWISE_OR, left=length, right=IRConst(1, Type.INT)),  # never malloc(0)
-                IRCall(dst=ptr, name='hornet_alloc', args=[size]),
+                self.allocation(ptr, size, False),  # (bytes)
                 IRCall(dst=None, name='memcpy', args=[ptr, src, length]),
             ], ptr, length
         if isinstance(e, t.StrFromRawParts):
@@ -900,7 +921,7 @@ class TypedFunctionBuilder:
                 else:  # a temporary array: the slice may outlive this statement, so its storage is on the heap
                     ptr = self.temp()
                     ir = [
-                             IRCall(dst=ptr, name='hornet_alloc', args=[IRConst(self.width(e.base.type), Type.INT64)])
+                             self.allocation(ptr, self.width(e.base.type), self.holds_pointers(e.base.type))
                          ] + self.write_into(ptr, e.base)
                 length = cap = IRConst(e.base.type.size, Type.INT)
             else:
@@ -1033,7 +1054,7 @@ class TypedFunctionBuilder:
             return self.address_of(e)
         if isinstance(e, t.BoxVariant):
             box = self.temp()
-            return [IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(e.value.type), Type.INT64)])] + \
+            return [self.allocation(box, self.width(e.value.type), self.holds_pointers(e.value.type))] + \
                 self.write_into(box, e.value), box
         if isinstance(e, t.Unary):
             ir, operand = self.value(e.operand)
@@ -1245,7 +1266,7 @@ class TypedFunctionBuilder:
         a str argument's bytes, any other argument as print shows it. Its first two words are then
         the result's pointer and length (the bytes are the result's to keep)."""
         buffer = self.temp()
-        slot = self.ids.new_slot(24, "format", self.ir_fn)
+        slot = self.ids.new_slot(_FORMAT_BUFFER_SIZE, "format", self.ir_fn)
         ir = [IRLocalAddress(dst=buffer, slot=slot), IRCall(dst=None, name='hornet_format_begin', args=[buffer])]
 
         def text(piece) -> list:
@@ -1302,7 +1323,7 @@ class TypedFunctionBuilder:
         symbol = s.init.symbol
         temp, _ = self.bind(symbol)
         box = self.temp()
-        ir = [IRCall(dst=box, name='hornet_alloc', args=[IRConst(self.width(symbol.type), Type.INT64)])]
+        ir = [self.allocation(box, self.width(symbol.type), self.holds_pointers(symbol.type))]
         if _scalar(symbol.type):
             current = self.temp(symbol.type)
             return ir + [
@@ -1511,11 +1532,12 @@ class TypedFunctionBuilder:
         return [call], result
 
     def write_bucket_layout(self, header, dict_type: Type) -> list:
-        """Store where a `dict_type`'s buckets hold the key and the value, and their stride, into its
-        header at `header`: the runtime goes by these."""
+        """Store where a `dict_type`'s buckets hold the key and the value, their stride, and whether
+        they may hold a pointer, into its header at `header`: the runtime goes by these."""
         ir = []
-        for field, value in zip((DICT_KEY_OFFSET_FIELD, DICT_VALUE_OFFSET_FIELD, DICT_STRIDE_FIELD),
-                                self.bucket_layout(dict_type)):
+        holds = self.holds_pointers(dict_type.key_type) or self.holds_pointers(dict_type.element_type)
+        fields = (DICT_KEY_OFFSET_FIELD, DICT_VALUE_OFFSET_FIELD, DICT_STRIDE_FIELD, DICT_HOLDS_POINTERS_FIELD)
+        for field, value in zip(fields, (*self.bucket_layout(dict_type), int(holds))):
             offset_ir, address = self.offset(header, field)
             ir += offset_ir + [IRStore(address=address, value=IRConst(value, Type.INT64), value_type=Type.INT64)]
         return ir
@@ -1532,10 +1554,9 @@ class TypedFunctionBuilder:
         while capacity < len(e.entries) * 2:
             capacity *= 2
         buckets, header, count = self.temp(), self.temp(), IRConst(0, Type.INT)
-        ir = [IRCall(dst=buckets, name='hornet_alloc_zeroed',
-                     args=[IRConst(capacity, Type.INT64), IRConst(self.bucket_layout(e.type)[2], Type.INT64)]),
-              IRCall(dst=header, name='hornet_alloc_zeroed',
-                     args=[IRConst(1, Type.INT64), IRConst(DICT_HEADER_SIZE, Type.INT64)])]
+        holds = self.holds_pointers(key_type) or self.holds_pointers(value_type)
+        ir = [self.allocation(buckets, self.bucket_layout(e.type)[2], holds, count=capacity),
+              self.allocation(header, DICT_HEADER_SIZE, True, count=1)]
         for offset, value in ((0, buckets), (24, IRConst(capacity, Type.INT64))):
             offset_ir, address = self.offset(header, offset)
             ir += offset_ir + [IRStore(address=address, value=value, value_type=Type.INT64)]
@@ -1621,7 +1642,7 @@ class TypedFunctionBuilder:
             IRBranch(cond=short, true_label=exactly, false_label=allocate),
             IRLabel(exactly), IRMove(dst=out_cap, src=new_len), IRJump(allocate),
             IRLabel(allocate),
-            IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, out_cap, width]),
+            self.slice_growth(grown, element_type, [ptr, length, out_cap, width]),
             IRMove(dst=out_ptr, src=grown),
             IRJump(copy),
             IRLabel(copy),
@@ -1658,7 +1679,7 @@ class TypedFunctionBuilder:
         ]
         new_cap, grown = self.temp(Type.INT), self.temp()
         ir += [IRLabel(grow)] + self.grown_capacity(new_cap, cap) + [
-            IRCall(dst=grown, name='hornet_slice_grow', args=[ptr, length, new_cap, width])]
+            self.slice_growth(grown, element_type, [ptr, length, new_cap, width])]
         ir += write_at(grown) + [
             IRMove(dst=out_ptr, src=grown),
             IRMove(dst=out_cap, src=new_cap),
@@ -1795,7 +1816,7 @@ class TypedFunctionBuilder:
         total, buffer, right_dst = self.temp(Type.INT), self.temp(), self.temp()
         return [
             IRBinOp(dst=total, op=BinaryOp.ADD, left=left_len, right=right_len),
-            IRCall(dst=buffer, name='hornet_alloc', args=[total]),
+            self.allocation(buffer, total, False),  # (bytes)
             IRCall(dst=None, name='memcpy', args=[buffer, left_ptr, left_len]),
             IRBinOp(dst=right_dst, op=BinaryOp.ADD, left=buffer, right=left_len),
             IRCall(dst=None, name='memcpy', args=[right_dst, right_ptr, right_len])

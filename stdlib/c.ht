@@ -3,13 +3,17 @@ intrinsic int _raw_len(str s)
 intrinsic str _from_raw_parts(*byte p, int n)
 
 # Memory from the runtime, which panics when there is none: `size` bytes, or `count` items all zero.
+# `_atomic` memory is for what holds no pointer (bytes, numbers), which a collector need not look
+# through; without it, memory may hold anything.
 extern *byte hornet_alloc(int size)
 extern *byte hornet_alloc_zeroed(int count, int size)
+extern *byte hornet_alloc_atomic(int size)
+extern *byte hornet_alloc_zeroed_atomic(int count, int size)
 extern memcpy(*byte dst, *byte src, int n)  # (C returns dst, which nothing here needs)
 extern int strlen(*byte s)
 
 def *byte to_cstring(str s):
-    *byte buf = hornet_alloc_zeroed(_raw_len(s) + 1, 1)  # (the last byte stays 0: where a C string ends)
+    *byte buf = hornet_alloc_zeroed_atomic(_raw_len(s) + 1, 1)  # (the last byte stays 0: where a C string ends)
     memcpy(buf, _raw_ptr(s), _raw_len(s))
     return buf
 

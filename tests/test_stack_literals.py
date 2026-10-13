@@ -61,8 +61,7 @@ def _allocations(function: str) -> int:
     program = build_ir_program(analyze(_parse(DECLS + function + "def int main():\n    return 0\n")),
                                keep_unreachable=True)
     fn = next(f for f in program.functions if f.name.rstrip('$') == 'f')
-    return sum(1 for instr in fn.body if isinstance(instr, IRCall) and instr.name in ('hornet_alloc',
-                                                                                    'hornet_alloc_zeroed'))
+    return sum(1 for instr in fn.body if isinstance(instr, IRCall) and instr.name.startswith('hornet_alloc'))
 
 
 STAYS = [

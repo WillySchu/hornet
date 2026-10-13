@@ -1,5 +1,5 @@
 # TCP connections, through the runtime: C's sockets differ between systems.
-from 'c' import from_cstring, to_cstring, from_raw_parts, hornet_alloc, memcpy
+from 'c' import from_cstring, to_cstring, from_raw_parts, hornet_alloc_atomic, memcpy
 from 'errors' import Error, IntResult, StrResult
 from 'strings' import index_of_byte
 
@@ -34,7 +34,7 @@ type Conn struct:
             return Error('read failed: ' + _reason())
         if n == 0:
             return ''
-        *byte copy = hornet_alloc(n)
+        *byte copy = hornet_alloc_atomic(n)
         memcpy(copy, c._chunk, n)
         return from_raw_parts(copy, n)
 
@@ -53,4 +53,4 @@ def ConnResult connect(str host, int port, int timeout_ms):
     int socket = hornet_tcp_connect(to_cstring(host), port, timeout_ms)
     if socket < 0:
         return Error('could not connect to ' + host + ': ' + _reason())
-    return Conn(socket, hornet_alloc(_CHUNK))
+    return Conn(socket, hornet_alloc_atomic(_CHUNK))

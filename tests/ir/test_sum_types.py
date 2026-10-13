@@ -206,7 +206,7 @@ def test_append_into_sum_typed_slice_uses_shapes_own_element_width():
         "    return 0\n"
     )
     fn = _fn(ir_program, 'main')
-    grows = [instr for instr in fn.body if isinstance(instr, IRCall) and instr.name == 'hornet_slice_grow']
+    grows = [instr for instr in fn.body if isinstance(instr, IRCall) and instr.name.startswith('hornet_slice_grow')]
     assert len(grows) == 1
     assert grows[0].args[3].value == 16
 
@@ -280,7 +280,7 @@ def test_widening_argument_too_large_for_a_stack_slot_mallocs_instead():
     assert 'argument_temp' not in fn.slot_labels.values()
     mallocs = [
         instr for instr in fn.body
-        if hasattr(instr, 'name') and getattr(instr, 'name', None) == 'hornet_alloc'
+        if hasattr(instr, 'name') and getattr(instr, 'name', '').startswith('hornet_alloc')
     ]
     assert len(mallocs) == 1
     assert mallocs[0].args[0].value == 40008

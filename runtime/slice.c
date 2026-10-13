@@ -5,7 +5,7 @@
 // passes the result slot first, then the str as (ptr, len).
 
 void hornet_bytes(struct hornet_slice *out, const char *ptr, int64_t len) {
-    out->ptr = hornet_alloc(len);
+    out->ptr = hornet_alloc_atomic(len);
     if (len > 0) {
         memcpy(out->ptr, ptr, (size_t)len);
     }
@@ -14,9 +14,17 @@ void hornet_bytes(struct hornet_slice *out, const char *ptr, int64_t len) {
 }
 
 
-// Room for new_cap elements of element_width bytes, with the first `len` copied in.
+// Room for new_cap elements of element_width bytes, with the first `len` copied in: elements that
+// may hold a pointer.
 void *hornet_slice_grow(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
-    void *new_ptr = hornet__alloc_items(new_cap, element_width);
+    void *new_ptr = hornet__alloc_items(new_cap, element_width, 1);
+    memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
+    return new_ptr;
+}
+
+// The same, for elements that hold none.
+void *hornet_slice_grow_atomic(const void *old_ptr, int64_t len, int64_t new_cap, int64_t element_width) {
+    void *new_ptr = hornet__alloc_items(new_cap, element_width, 0);
     memcpy(new_ptr, old_ptr, (size_t)len * (size_t)element_width);
     return new_ptr;
 }

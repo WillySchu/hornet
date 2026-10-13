@@ -40,18 +40,17 @@ int64_t hornet_read_fd(int64_t fd, char *ptr, int64_t len) {
 // The next line of standard input, without its "\n" or "\r\n", in memory the caller keeps; its
 // length goes to *len. NULL at the end of the input (*len 0), or on an error (*len -1).
 char *hornet_read_line(int64_t *len) {
-    size_t cap = 128, n = 0;
-    char *line = hornet_alloc((int64_t)cap);
+    size_t cap = 0, n = 0;
+    char *line = NULL;
     int c;
     while ((c = getc(stdin)) != EOF && c != '\n') {
         if (n == cap) {
-            cap *= 2;
-            line = hornet__realloc(line, (int64_t)cap);
+            cap = cap == 0 ? 128 : cap * 2;
+            line = line == NULL ? hornet_alloc_atomic((int64_t)cap) : hornet__realloc_atomic(line, (int64_t)cap);
         }
         line[n++] = (char)c;
     }
     if (c == EOF && n == 0) {
-        free(line);
         *len = ferror(stdin) ? -1 : 0;
         return NULL;
     }
@@ -59,7 +58,7 @@ char *hornet_read_line(int64_t *len) {
         n--;
     }
     *len = (int64_t)n;
-    return line;
+    return line != NULL ? line : hornet_alloc_atomic(1);  // (an empty line is still somewhere)
 }
 
 // Whether `fd` is a terminal (so a person, not a file or a pipe, is at the other end).

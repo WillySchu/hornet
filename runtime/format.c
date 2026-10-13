@@ -192,11 +192,13 @@ void hornet__stringify(void *value_addr, const unsigned char *type_desc, int quo
 // appended. Its first two words are then the str: the bytes are never freed, being the result.
 _Static_assert(offsetof(struct hornet_buf, ptr) == 0 && offsetof(struct hornet_buf, len) == 8,
                "a hornet_buf starts with a str's pointer and length");
+_Static_assert(sizeof(struct hornet_buf) == 32, "the compiled code keeps a hornet_buf of 32 bytes");
 
 void hornet_format_begin(struct hornet_buf *buf) {
     buf->cap = 32;
-    buf->ptr = hornet_alloc(buf->cap);
+    buf->ptr = hornet_alloc_atomic(buf->cap);
     buf->len = 0;
+    buf->scratch = 0;
 }
 
 void hornet_format_text(struct hornet_buf *buf, const char *ptr, int64_t len) {
@@ -209,12 +211,9 @@ void hornet_format_value(struct hornet_buf *buf, void *value_addr, const unsigne
 }
 
 void hornet_print(void *value_addr, const unsigned char *type_desc) {
-    struct hornet_buf buf;
-    buf.cap = 16;
-    buf.ptr = hornet_alloc(buf.cap);
-    buf.len = 0;
+    struct hornet_buf buf = {hornet__scratch_alloc(16), 0, 16, 1};
     hornet__stringify(value_addr, type_desc, 0, &buf);
     hornet_buf_append_byte(&buf, '\n');
     hornet_write_fd(1, buf.ptr, buf.len);
-    free(buf.ptr);
+    hornet__scratch_free(buf.ptr);
 }

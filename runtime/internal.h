@@ -57,15 +57,27 @@ const char *hornet__function_at(const char *address);
 size_t hornet__stack_overflow_rest(char *text, size_t room, const char *function);
 
 // ---- Memory (memory.c).
-
-// `count` items of `size` bytes, uninitialized.
-void *hornet__alloc_items(int64_t count, int64_t size);
-
-// realloc, for the runtime's own growing buffers.
-void *hornet__realloc(void *ptr, int64_t size);
+//
+// Memory a program's values are kept in comes in two kinds: what may hold a pointer, and what is
+// known to hold none (`_atomic`: bytes, numbers). The runtime's own scratch memory, which no value
+// is ever kept in, is a third, and is freed when it is done with.
 
 void *hornet_alloc(int64_t size);
+void *hornet_alloc_atomic(int64_t size);
 void *hornet_alloc_zeroed(int64_t count, int64_t size);
+void *hornet_alloc_zeroed_atomic(int64_t count, int64_t size);
+
+// `count` items of `size` bytes, uninitialized; as hornet_alloc if they may hold a pointer, else as
+// hornet_alloc_atomic.
+void *hornet__alloc_items(int64_t count, int64_t size, int holds_pointers);
+
+// Grow memory from hornet_alloc_atomic to `size` bytes, keeping what it held: a str being built.
+void *hornet__realloc_atomic(void *ptr, int64_t size);
+
+// The runtime's own scratch memory.
+void *hornet__scratch_alloc(int64_t size);
+void *hornet__scratch_realloc(void *ptr, int64_t size);
+void hornet__scratch_free(void *ptr);
 
 // Where a sum's payload is: after its 4-byte tag, at 8 (typesys.py's SUM_PAYLOAD_OFFSET).
 #define HORNET_SUM_PAYLOAD_OFFSET 8
@@ -77,8 +89,9 @@ struct hornet_dict {
     int64_t count, tombstones, capacity;
     int64_t key_offset, value_offset;  // where in a bucket, after its state byte, the key and value are
     int64_t stride;  // how far apart buckets are
+    int64_t holds_pointers;  // whether a bucket may hold one (in its key or value): how to allocate them
 };
-_Static_assert(sizeof(struct hornet_dict) == 56 && offsetof(struct hornet_dict, key_offset) == 32,
+_Static_assert(sizeof(struct hornet_dict) == 64 && offsetof(struct hornet_dict, key_offset) == 32,
                "a dict's header is as typesys.py has it");
 
 // Bucket state byte. Tombstones keep probe chains intact after deletion.
@@ -91,9 +104,10 @@ struct hornet_buf {
     char *ptr;
     int64_t len;
     int64_t cap;
+    int64_t scratch;  // 0: the bytes become a str (from hornet_alloc_atomic); 1: the runtime's scratch memory
 };
 
-// Ensure `additional` spare bytes, growing by doubling.
+// Ensure `additional` spare bytes, growing by doubling (as the buffer's kind of memory).
 void hornet__buf_ensure(struct hornet_buf *buf, int64_t additional);
 
 static inline void hornet_buf_append_bytes(struct hornet_buf *buf, const char *data, int64_t count) {

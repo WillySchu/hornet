@@ -30,13 +30,14 @@ static int g_failures = 0;
 static char *stringify_to_cstr(void *value_addr, const uint64_t *type_desc, int quote_strings) {
     struct hornet_buf buf;
     buf.cap = 4;  // deliberately tiny, to force growth on almost every test
-    buf.ptr = malloc((size_t)buf.cap);
+    buf.ptr = hornet__scratch_alloc(buf.cap);
     buf.len = 0;
+    buf.scratch = 1;
     hornet__stringify(value_addr, (const unsigned char *)type_desc, quote_strings, &buf);
     char *result = malloc((size_t)buf.len + 1);
     memcpy(result, buf.ptr, (size_t)buf.len);
     result[buf.len] = '\0';
-    free(buf.ptr);
+    hornet__scratch_free(buf.ptr);
     return result;
 }
 
@@ -345,7 +346,7 @@ static void test_dict_bucket_layout(void) {
         int64_t value;
     } buckets[4] = {{0, 0, 0}, {HORNET_DICT_BUCKET_OCCUPIED, 1, 10}, {HORNET_DICT_BUCKET_TOMBSTONE, 9, 90},
                     {HORNET_DICT_BUCKET_OCCUPIED, 2, 20}};
-    struct hornet_dict header = {buckets, 2, 1, 4, 1, 8, sizeof buckets[0]};
+    struct hornet_dict header = {buckets, 2, 1, 4, 1, 8, sizeof buckets[0], 0};
     struct hornet_dict *value = &header;
     char *s = stringify_to_cstr(&value, dict_desc, 0);
     CHECK_STR(s, "dict[int8]int{1: 10, 2: 20}");

@@ -23,7 +23,7 @@ static int hornet_temporary_file(void) {
 int64_t hornet_process_run(const char *args, int64_t count, int64_t *out_fd, int64_t *err_fd, int64_t *signal) {
     *signal = 0;
     *out_fd = *err_fd = -1;
-    char **argv = hornet_alloc((count + 1) * (int64_t)sizeof(char *));
+    char **argv = hornet__scratch_alloc((count + 1) * (int64_t)sizeof(char *));
     const char *arg = args;
     for (int64_t i = 0; i < count; i++) {
         argv[i] = (char *)arg;
@@ -74,12 +74,14 @@ int64_t hornet_process_run(const char *args, int64_t count, int64_t *out_fd, int
     lseek(err, 0, SEEK_SET);
     *out_fd = out;
     *err_fd = err;
+    hornet__scratch_free(argv);
     if (WIFSIGNALED(status)) {
         *signal = WTERMSIG(status);
         return 0;
     }
     return WEXITSTATUS(status);
 failed:
+    hornet__scratch_free(argv);
     if (out >= 0) close(out);
     if (err >= 0) close(err);
     if (in >= 0) close(in);

@@ -52,7 +52,7 @@ static HANDLE hornet_temporary_file(void) {
 int64_t hornet_process_run(const char *args, int64_t count, int64_t *out_fd, int64_t *err_fd, int64_t *signal) {
     *signal = 0;
     *out_fd = *err_fd = -1;
-    struct hornet_buf line = {0};
+    struct hornet_buf line = {hornet__scratch_alloc(64), 0, 64, 1};
     const char *arg = args;
     for (int64_t i = 0; i < count; i++) {
         if (i > 0) {
@@ -68,6 +68,7 @@ int64_t hornet_process_run(const char *args, int64_t count, int64_t *out_fd, int
                             NULL);
     if (out == INVALID_HANDLE_VALUE || err == INVALID_HANDLE_VALUE || in == INVALID_HANDLE_VALUE) {
         hornet__system_failed();
+        hornet__scratch_free(line.ptr);
         if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
         if (err != INVALID_HANDLE_VALUE) CloseHandle(err);
         if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
@@ -81,6 +82,7 @@ int64_t hornet_process_run(const char *args, int64_t count, int64_t *out_fd, int
     startup.hStdError = err;
     PROCESS_INFORMATION process;
     BOOL started = CreateProcessA(NULL, line.ptr, NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process);
+    hornet__scratch_free(line.ptr);
     if (!started) {
         hornet__system_failed();
     }

@@ -99,7 +99,7 @@ def test_what_a_call_becomes():
 def _allocations(main_body: str) -> int:
     program = build_ir_program(analyze(_parse(DECLS + "def int main():\n" + main_body)), keep_unreachable=True)
     fn = next(f for f in program.functions if f.name.rstrip('$') == 'main')
-    return sum(1 for i in fn.body if isinstance(i, IRCall) and i.name in ('hornet_alloc', 'hornet_alloc_zeroed'))
+    return sum(1 for i in fn.body if isinstance(i, IRCall) and i.name.startswith('hornet_alloc'))  # (any kind)
 
 
 def test_packing_allocates_only_what_the_callee_keeps():

@@ -9,7 +9,7 @@ char *hornet_make_temp_dir(void) {
         hornet__system_failed();
         return NULL;
     }
-    char *path = hornet_alloc(MAX_PATH + 64);
+    char *path = hornet_alloc_atomic(MAX_PATH + 64);
     for (unsigned attempt = 0; attempt < 1000; attempt++) {
         snprintf(path, MAX_PATH + 64, "%shornet-%lu-%lu-%u", dir, (unsigned long)GetCurrentProcessId(),
                  (unsigned long)GetTickCount(), attempt);
@@ -24,7 +24,7 @@ char *hornet_make_temp_dir(void) {
     return NULL;
 #else
     const char *dir = getenv("TMPDIR");
-    char *path = hornet_alloc(4096);
+    char *path = hornet_alloc_atomic(4096);
     snprintf(path, 4096, "%s/hornet-XXXXXX", dir != NULL && *dir != '\0' ? dir : "/tmp");
     if (mkdtemp(path) == NULL) {
         hornet__system_failed();
@@ -47,7 +47,7 @@ static int hornet_is_directory(const char *path) {
 // Make the directory `path`, and those it is in, as needed: 0, or -1 (with what is made kept).
 int64_t hornet_make_dirs(const char *path) {
     size_t n = strlen(path);
-    char *partial = hornet_alloc((int64_t)n + 1);
+    char *partial = hornet__scratch_alloc((int64_t)n + 1);
     memcpy(partial, path, n + 1);
     for (size_t i = 1; i <= n; i++) {
         if (i < n && partial[i] != '/' && partial[i] != '\\') {
@@ -72,10 +72,12 @@ int64_t hornet_make_dirs(const char *path) {
             } else {
                 hornet__system_failed();
             }
+            hornet__scratch_free(partial);
             return -1;
         }
         partial[i] = kept;
     }
+    hornet__scratch_free(partial);
     return 0;
 }
 
