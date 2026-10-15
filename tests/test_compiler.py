@@ -12303,8 +12303,12 @@ class TestTypedLiterals:
         # (With its type. Without, `[x][0] * ys[1]` has the tokens of the typed literal `[N][M]*P[...]`,
         # which is how it is read: test_what_reads_as_a_typed_literal_but_is_not_one_says_so.)
         assert_program_stdout(
-            "def int main():\n    int x = 3\n    [2]int ys = [4, 5]\n"
-            "    print([1]int[x][0] * ys[1])\n    print([2]int[x, 2][1] * ys[0] + [1]int[7][0] * ys[1])\n    return 0\n",
+            "def int main():\n"
+            "    int x = 3\n"
+            "    [2]int ys = [4, 5]\n"
+            "    print([1]int[x][0] * ys[1])\n"
+            "    print([2]int[x, 2][1] * ys[0] + [1]int[7][0] * ys[1])\n"
+            "    return 0\n",
             "15\n43\n")
 
     def test_a_literal_of_pointers_behind_two_fixed_sizes_can_be_written_inline(self):
@@ -12339,8 +12343,13 @@ class TestTypedLiterals:
 
     def test_an_indexed_literal_times_a_value_is_not_a_typed_literal(self):
         assert_program_stdout(
-            "def int main():\n    int x = 3\n    int y = 4\n"
-            "    print([1]int[x][0] * y)\n    print([1]int[5][0] * y)\n    print([2]int[x, 2][1] * (y))\n    return 0\n",
+            "def int main():\n"
+            "    int x = 3\n"
+            "    int y = 4\n"
+            "    print([1]int[x][0] * y)\n"
+            "    print([1]int[5][0] * y)\n"
+            "    print([2]int[x, 2][1] * (y))\n"
+            "    return 0\n",
             "12\n20\n8\n")
 
     def test_typed_literals_of_pointers(self):

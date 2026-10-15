@@ -46,7 +46,6 @@ Updates:
 - Interfaces.
 - Error handling.
 - Finding the stack top uses \_\_libc\_stack\_end, which is glibc only (musl would need the record-on-entry approach). On Windows it uses GetCurrentThreadStackLimits, which needs Windows 8 or later. macOS is untested.
-- Free memory `malloc`ed by string concatenation.
 - Explore graph coloring algorithm for register allocation (Chaitin-Briggs).
 - Link to non libc functions for FFI?
 - TLS.
