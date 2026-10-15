@@ -53,7 +53,7 @@ EXT = 'EXT'
 
 
 def _param(i: int) -> tuple:
-    return ('param', i)
+    return 'param', i
 
 
 def _is_external(loc) -> bool:
@@ -61,13 +61,13 @@ def _is_external(loc) -> bool:
 
 
 def _heap(node) -> tuple:
-    return ('heap', node.nid)
+    return 'heap', node.nid
 
 
 def _literal(node) -> tuple:
     """The storage of an `S(...)` struct literal, or of a slice literal's elements, which may need the
     heap like a variable's."""
-    return ('literal', node.nid)
+    return 'literal', node.nid
 
 
 def literal_on_heap(node, heap: set, structs: dict[str, StructInfo], sum_types: dict) -> bool:
