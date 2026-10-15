@@ -170,7 +170,6 @@ def test_another_modules_variadics(tmp_path):
     assert _run(entry) == "9\n6\n24\n0\n"
 
 
-
 @GCC_SKIP
 def test_what_a_packed_argument_may_be():
     # As anywhere a value of the element type is wanted: struct literals, `&S(...)` and `none`, untyped
