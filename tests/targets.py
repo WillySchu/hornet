@@ -56,11 +56,20 @@ def _keep_a_wine_server_running() -> None:
 _keep_a_wine_server_running()
 
 
+def program_prefix(target: Target) -> list:
+    """run_prefix(target); and under --gc-stress, under qemu or Wine, collecting before every 10th
+    allocation rather than every one, which would take minutes there for the larger programs."""
+    prefix = run_prefix(target)
+    if prefix and os.environ.get('HORNET_GC_STRESS') == '1':
+        return ['env', 'HORNET_GC_STRESS=10', *prefix]
+    return prefix
+
+
 def run_binary(target: Target, argv: list, **kwargs) -> subprocess.CompletedProcess:
     """Run a binary built for `target`: under qemu-user if it's a foreign architecture, under Wine
     if it's for Windows. The result compares equal across targets: qemu's own report of a fatal
     signal is dropped from stderr, and a Windows panic is reported as the SIGABRT it is elsewhere."""
-    prefix = run_prefix(target)
+    prefix = program_prefix(target)
     result = subprocess.run(prefix + [str(a) for a in argv], **kwargs)
     if prefix and isinstance(result.stderr, str):
         result.stderr = ''.join(line for line in result.stderr.splitlines(keepends=True)

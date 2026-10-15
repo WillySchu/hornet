@@ -1,0 +1,34 @@
+# The benchmarks game's binary-trees: many short-lived trees, and one that lives throughout.
+type Branch struct:
+    *Tree left
+    *Tree right
+
+type Tree is none | Branch
+
+def *Tree new_tree(Tree tree):
+    return &tree
+
+def *Tree make(int depth):
+    if depth == 0:
+        return new_tree(none)
+    return new_tree(Branch(make(depth - 1), make(depth - 1)))
+
+def int check(*Tree tree):
+    match *tree as node:
+        is none:
+            return 1
+        is Branch:
+            return 1 + check(node.left) + check(node.right)
+
+def int main():
+    int max_depth = 15
+    int total = check(make(max_depth + 1))
+    *Tree long_lived = make(max_depth)
+    for int depth = 4; depth <= max_depth; depth += 2:
+        int iterations = 1 << (max_depth - depth + 4)
+        int sum = 0
+        for int i = 0; i < iterations; i += 1:
+            sum += check(make(depth))
+        total = (total * 31 + sum) & 1048575
+    total = (total * 31 + check(long_lived)) & 1048575
+    return (total ^ (total >> 8) ^ (total >> 16)) % 256

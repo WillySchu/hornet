@@ -11,7 +11,7 @@
     "executed_instructions": null,
     "instruction_count": 75,
     "name": "arithmetic_heavy",
-    "runtime_seconds": 0.09690979099832475
+    "runtime_seconds": 0.09382549999281764
   },
   "array_heavy": {
     "allocation": {
@@ -25,7 +25,21 @@
     "executed_instructions": null,
     "instruction_count": 299,
     "name": "array_heavy",
-    "runtime_seconds": 0.035641124937683344
+    "runtime_seconds": 0.035019374918192625
+  },
+  "binary_trees": {
+    "allocation": {
+      "address_taken_excluded": 0,
+      "allocated": 59,
+      "eligible": 59,
+      "live_across_call": 12,
+      "spilled": 0,
+      "total_temps": 59
+    },
+    "executed_instructions": null,
+    "instruction_count": 182,
+    "name": "binary_trees",
+    "runtime_seconds": 0.0809395001269877
   },
   "branchy": {
     "allocation": {
@@ -39,7 +53,7 @@
     "executed_instructions": null,
     "instruction_count": 141,
     "name": "branchy",
-    "runtime_seconds": 0.0709654160309583
+    "runtime_seconds": 0.07086100010201335
   },
   "calling_convention_heavy": {
     "allocation": {
@@ -53,7 +67,7 @@
     "executed_instructions": null,
     "instruction_count": 837,
     "name": "calling_convention_heavy",
-    "runtime_seconds": 0.10811833292245865
+    "runtime_seconds": 0.09432075009681284
   },
   "calls_in_loop": {
     "allocation": {
@@ -67,7 +81,7 @@
     "executed_instructions": null,
     "instruction_count": 86,
     "name": "calls_in_loop",
-    "runtime_seconds": 0.07353808311745524
+    "runtime_seconds": 0.07347145909443498
   },
   "copy_heavy": {
     "allocation": {
@@ -81,7 +95,7 @@
     "executed_instructions": null,
     "instruction_count": 939,
     "name": "copy_heavy",
-    "runtime_seconds": 0.09249495808035135
+    "runtime_seconds": 0.07266341708600521
   },
   "dict_heavy": {
     "allocation": {
@@ -95,7 +109,7 @@
     "executed_instructions": null,
     "instruction_count": 824,
     "name": "dict_heavy",
-    "runtime_seconds": 0.09562354115769267
+    "runtime_seconds": 0.09340491611510515
   },
   "loop_accumulator": {
     "allocation": {
@@ -109,7 +123,7 @@
     "executed_instructions": null,
     "instruction_count": 45,
     "name": "loop_accumulator",
-    "runtime_seconds": 0.17618441605009139
+    "runtime_seconds": 0.17613112507387996
   },
   "recursive_fibonacci": {
     "allocation": {
@@ -123,7 +137,7 @@
     "executed_instructions": null,
     "instruction_count": 42,
     "name": "recursive_fibonacci",
-    "runtime_seconds": 0.023264124989509583
+    "runtime_seconds": 0.023249750025570393
   },
   "register_pressure": {
     "allocation": {
@@ -137,7 +151,7 @@
     "executed_instructions": null,
     "instruction_count": 121,
     "name": "register_pressure",
-    "runtime_seconds": 0.06154941604472697
+    "runtime_seconds": 0.06116166710853577
   },
   "string_heavy": {
     "allocation": {
@@ -151,7 +165,7 @@
     "executed_instructions": null,
     "instruction_count": 121,
     "name": "string_heavy",
-    "runtime_seconds": 0.011331999907270074
+    "runtime_seconds": 0.009705499978736043
   },
   "struct_heavy": {
     "allocation": {
@@ -165,7 +179,7 @@
     "executed_instructions": null,
     "instruction_count": 167,
     "name": "struct_heavy",
-    "runtime_seconds": 0.014407583978027105
+    "runtime_seconds": 0.013099041068926454
   },
   "sum_type_walk": {
     "allocation": {
@@ -179,7 +193,7 @@
     "executed_instructions": null,
     "instruction_count": 636,
     "name": "sum_type_walk",
-    "runtime_seconds": 0.06292400020174682
+    "runtime_seconds": 0.06001024995930493
   },
   "tokenize": {
     "allocation": {
@@ -193,6 +207,6 @@
     "executed_instructions": null,
     "instruction_count": 306,
     "name": "tokenize",
-    "runtime_seconds": 0.06477512489072978
+    "runtime_seconds": 0.06495545897632837
   }
 }

@@ -3,10 +3,10 @@
 // Every allocation, the compiled code's and the runtime's own, comes through here, so that being
 // refused memory is a panic and not a write through a null pointer. (A system that grants memory it
 // doesn't have, as Linux does by default, kills the program when the memory is used: there is no
-// refusal to catch then.) Nothing is freed yet but the runtime's own scratch memory.
+// refusal to catch then.)
 //
 // Memory that may hold a pointer and memory that holds none (`_atomic`) are asked for apart, for
-// the collector that will free what nothing points to: it need look for pointers only in the first.
+// the collector, which frees what nothing points to: it need look for pointers only in the first.
 // Both are the heap's (heap.c); the runtime's scratch memory is malloc's.
 #include "internal.h"
 

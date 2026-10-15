@@ -11,6 +11,7 @@ to change here, benchmarks/baseline.json almost certainly needs a
 fresh --save-baseline run too, since the program itself changed.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ EXPECTED_EXIT_CODES = {
     'tokenize': 136,  # lexer-style byte scan over a 270 KB str, 60 times
     'dict_heavy': 192,  # int- and str-keyed insert/delete/lookup/iterate
     'sum_type_walk': 7,  # recursive match dispatch over a sum-typed tree
+    'binary_trees': 10,  # many short-lived heap trees and one long-lived: allocation and collection
 }
 
 # How many times each benchmark's compiled binary is run. A register wrongly shared between two
@@ -49,11 +51,17 @@ EXPECTED_EXIT_CODES = {
 # run can pass by luck. Compilation is deterministic: compile once, then run this many times.
 RERUNS = 10 if TIER == 'full' else 1
 
+# Under --gc-stress, how often a benchmark that keeps much alive collects instead: each collection
+# looks through all of it, and before every one of binary_trees' millions of allocations would take hours.
+STRESS_EVERY = {'binary_trees': '50000'}
+
 
 @GCC_SKIP
 @pytest.mark.parametrize('name', sorted(EXPECTED_EXIT_CODES))
 @each_e2e_target
-def test_benchmark_still_compiles_and_runs_correctly(name, target, tmp_path):
+def test_benchmark_still_compiles_and_runs_correctly(name, target, tmp_path, monkeypatch):
+    if os.environ.get('HORNET_GC_STRESS') and name in STRESS_EVERY:
+        monkeypatch.setenv('HORNET_GC_STRESS', STRESS_EVERY[name])
     path = str(PROGRAMS_DIR / f'{name}.ht')
     bin_path = tmp_path / 'program'
     build_executable(path, str(bin_path), target=target)  # full driver, so imports work
@@ -86,10 +94,13 @@ def test_benchmark_runner_end_to_end(target, tmp_path):
     import sys
     out = tmp_path / 'results.json'
     runner = PROGRAMS_DIR.parent / 'run_benchmarks.py'
+    # (Not under --gc-stress, which the test above already runs each program with, and which would
+    # make binary_trees outlast the runner's timeout.)
+    environment = {k: v for k, v in os.environ.items() if k != 'HORNET_GC_STRESS'}
     result = subprocess.run(
         [sys.executable, str(runner), '--runs', '1', '--target', str(target), '--json', str(out),
          '--compare', str(tmp_path / 'none.json')],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=environment,
     )
     assert result.returncode == 0, result.stderr
     results = json.loads(out.read_text())

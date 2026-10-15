@@ -385,6 +385,40 @@ static void test_heap_finds_each_object_from_inside_it(void) {
     }
 }
 
+// Each size rounds up to the smallest class that holds it: the classes are the sizes that round to
+// themselves, and a size's room changes only past one of them.
+static void test_heap_rounds_each_size_up_to_its_class(void) {
+    int ok = hornet__heap_slot_size(0) == 8;
+    for (int64_t size = 1; size <= 32768; size++) {
+        int64_t room = hornet__heap_slot_size(size), before = hornet__heap_slot_size(size - 1);
+        ok &= room >= size && room % 8 == 0 && hornet__heap_slot_size(room) == room;
+        ok &= room == before || before == size - 1;
+        ok &= room < (size < 8 ? 8 : size) * 5 / 4 + 8;  // a quarter apart
+    }
+    ok &= hornet__heap_slot_size(32769) == 32769;
+    CHECK(ok);
+}
+
+// From its first byte and its last, each object of each class on a page or more of them. (The slot
+// an address is in is found by multiplying, not dividing: the pages' ends are where that would err.)
+static void test_heap_finds_each_object_of_a_full_page(void) {
+    int ok = 1;
+    for (int64_t size = 8; size <= 32768; size = hornet__heap_slot_size(size + 1)) {
+        int64_t count = 65536 / size + 2;
+        char **volatile objects = hornet__heap_alloc(count * (int64_t)sizeof(char *), 1, 0);
+        for (int64_t i = 0; i < count; i++) {
+            objects[i] = hornet__heap_alloc(size, 0, 0);
+        }
+        for (int64_t i = 0; i < count; i++) {
+            struct hornet_heap_object first, last;
+            ok &= hornet__heap_find((uintptr_t)objects[i], &first) && first.start == objects[i];
+            ok &= hornet__heap_find((uintptr_t)objects[i] + (uintptr_t)size - 1, &last) && last.start == objects[i];
+            ok &= first.size == size;
+        }
+    }
+    CHECK(ok);
+}
+
 static void test_heap_tells_a_slot_not_handed_out(void) {
     char *object = hornet__heap_alloc(20000, 1, 0);  // (a class few others use: 20480 bytes, 3 to a page)
     struct hornet_heap_object found;
@@ -582,6 +616,9 @@ static void test_gc_reuses_what_it_frees(void) {
     hornet__heap_stats(&after);
     CHECK(after.collections >= before.collections + 10);
     CHECK_FREED(after.pages < before.pages + 64 * 16 * 2);  // (a collection's worth of pages, 8 MB, twice over)
+    collect();
+    hornet__heap_stats(&after);
+    CHECK(after.empty_pages > 0 && after.empty_pages <= 16);  // kept for reuse: 1 MB, as little is alive
 }
 
 __attribute__((noinline)) static uintptr_t make_garbage_bytes(void) {
@@ -745,6 +782,8 @@ int main(void) {
     test_heap_large_objects();
     test_heap_finds_nothing_elsewhere();
     test_heap_grows_a_str_s_bytes_keeping_them();
+    test_heap_rounds_each_size_up_to_its_class();
+    test_heap_finds_each_object_of_a_full_page();
     test_gc_keeps_what_the_stack_reaches_and_frees_the_rest();
     test_gc_doesnt_look_through_what_holds_no_pointers();
     test_gc_keeps_an_object_pointed_to_inside();

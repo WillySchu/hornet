@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from build import build_executable, run_prefix
-from tests.targets import E2E_TARGETS
+from build import build_executable
+from tests.targets import E2E_TARGETS, program_prefix
 from tests.test_compiler import GCC_SKIP
 
 CALC = Path(__file__).resolve().parent.parent / 'examples' / 'calc'
@@ -24,7 +24,7 @@ def calc(request, tmp_path_factory):
     """Command running the calculator built for each E2E target."""
     exe = tmp_path_factory.mktemp(f'calc-{request.param}') / 'calc'
     build_executable(str(CALC / 'main.ht'), str(exe), target=request.param)
-    return run_prefix(request.param) + [str(exe)]
+    return program_prefix(request.param) + [str(exe)]
 
 
 def _run(calc, *args, stdin=None):

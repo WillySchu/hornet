@@ -7,6 +7,7 @@
 // bytes to 32 KB, about a quarter apart), where its start follows from any address inside it by
 // arithmetic; a larger one has a run of pages to itself. A table finds the record of any page from
 // its address. Pages of objects that hold pointers and of objects that hold none are kept apart.
+// Pages left empty are kept for reuse, up to a quarter of what is alive (1 MB at least).
 //
 // The collector is conservative: it can't tell a pointer from a number that looks like one, so
 // takes every word that is the address of (anywhere in) an object as keeping it, starting from the
@@ -31,7 +32,7 @@
 #define HORNET_PAGE_SIZE ((uintptr_t)1 << HORNET_PAGE_SHIFT)
 
 // The size classes: 8 to 64 by 8, then four to each doubling, to 32 KB. Each a multiple of 8, the
-// most any value's alignment needs.
+// most any value's alignment needs; and each above 1 KB a multiple of 128 (see hornet_class_of).
 static const uint32_t hornet_classes[] = {
     8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768,
     896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192, 10240, 12288,
@@ -39,6 +40,12 @@ static const uint32_t hornet_classes[] = {
 };
 #define HORNET_CLASS_COUNT ((int)(sizeof hornet_classes / sizeof hornet_classes[0]))
 #define HORNET_LARGEST_SMALL 32768
+#define HORNET_FINE_CLASSES 1024  // sizes up to this are looked up by 8s, above it by 128s
+
+// The class of each size, rounded up to a multiple of 8 (to 1 KB) or of 128 (above): no class
+// lies between a size and its rounding, so both have the same one. Filled at the first allocation.
+static uint8_t hornet_class_by_8[HORNET_FINE_CLASSES / 8 + 1];
+static uint8_t hornet_class_by_128[HORNET_LARGEST_SMALL / 128 + 1];
 
 // A page's record, kept apart from the page. A large object's pages all share one.
 struct hornet_page {
@@ -47,7 +54,9 @@ struct hornet_page {
     uint32_t slots;            // a small page's: how many objects it holds
     uint32_t fresh;            // of those, how many have been handed out at some time (from the start)
     uint32_t live;             // how many are allocated now
+    uint64_t reciprocal;       // 2^32 / object_size, rounded up: offset * it >> 32 is offset / object_size
     int64_t large_size;        // a large object's size, as asked for
+    int class;                 // a small page's size class
     int holds_pointers;        // whether its objects may hold a pointer
     int large_marked;          // a large object's mark
     void *free;                // a small page's freed slots: each's first word is the next
@@ -56,6 +65,8 @@ struct hornet_page {
     uint64_t *marked;          // ... and which the collector has found reachable
     uint64_t bits[];           // (where those two are)
 };
+// (The reciprocal is exact: for an offset o < 2^16 and a size s <= 2^15, o * (2^32/s + e) / 2^32,
+// 0 <= e < 1, is o/s plus less than 2^-16, while o/s is an integer or at least 1/s below one.)
 
 // The table, from a page's number (its address >> 16) to its record: the number's high 16 bits pick
 // a block of the table, made when first needed, and its low 16 bits the record in it. (Addresses go
@@ -74,12 +85,17 @@ static size_t hornet_page_count, hornet_page_room;
 // the first is the one being filled.
 static struct hornet_page *hornet_with_room[2][HORNET_CLASS_COUNT];
 
-// Allocated since the collector last ran, and how much makes it run again.
-static int64_t hornet_allocated_since, hornet_collect_at = 8 << 20;
+// Empty pages kept for reuse, with no record (each's first word is the next).
+static void *hornet_empty_pages;
+static int64_t hornet_empty_count;
+
+// Allocated since the collector last ran, and how much makes it run again. Allocation's fast path
+// checks hornet_collect_at, which under HORNET_GC_STRESS is -1: everything takes the slow path.
+static int64_t hornet_allocated_since, hornet_threshold = 8 << 20, hornet_collect_at = 8 << 20;
 static struct hornet_heap_stats hornet_stats;
 
 // HORNET_GC_STRESS and HORNET_GC_POISON, read at the first allocation.
-static int hornet_settings_read, hornet_poison;
+static int hornet_started, hornet_poison;
 static int64_t hornet_stress_every, hornet_stress_count;
 
 // The collector's own scratch: objects found but not yet looked through.
@@ -113,6 +129,33 @@ static void hornet_free_pages(void *memory) {
 #else
     free(memory);
 #endif
+}
+
+// One page: a kept empty one if there is one.
+static void *hornet_get_page(void) {
+    void *page = hornet_empty_pages;
+    if (page == NULL) {
+        return hornet_get_pages(HORNET_PAGE_SIZE);
+    }
+    memcpy(&hornet_empty_pages, page, sizeof page);
+    hornet_empty_count--;
+    return page;
+}
+
+static void hornet_keep_empty_page(void *page) {
+    memcpy(page, &hornet_empty_pages, sizeof page);
+    hornet_empty_pages = page;
+    hornet_empty_count++;
+}
+
+// Give the kept empty pages beyond the first `keep` back to the C library.
+static void hornet_give_back_empty_pages(int64_t keep) {
+    while (hornet_empty_count > keep) {
+        void *page = hornet_empty_pages;
+        memcpy(&hornet_empty_pages, page, sizeof page);
+        hornet_empty_count--;
+        hornet_free_pages(page);
+    }
 }
 
 // Have the table give `page` (NULL: no page) for each of the `count` pages from `address`.
@@ -160,88 +203,108 @@ static struct hornet_page *hornet_new_record(uintptr_t start, size_t pages, uint
 }
 
 // The size class for `size` bytes (at most HORNET_LARGEST_SMALL): the smallest that holds it.
-static int hornet_class_of(int64_t size) {
-    if (size <= 64) {
-        return size <= 8 ? 0 : (int)((size + 7) / 8) - 1;
-    }
-    int low = 8, high = HORNET_CLASS_COUNT - 1;  // hornet_classes[high] >= size, hornet_classes[low - 1] < size
-    while (low < high) {
-        int middle = (low + high) / 2;
-        if (hornet_classes[middle] >= size) {
-            high = middle;
-        } else {
-            low = middle + 1;
-        }
-    }
-    return low;
+static inline int hornet_class_of(int64_t size) {
+    return size <= HORNET_FINE_CLASSES ? hornet_class_by_8[(size + 7) >> 3] : hornet_class_by_128[(size + 127) >> 7];
 }
 
-static int hornet_bit(const uint64_t *bits, uint32_t index) {
-    return (int)((bits[index / 64] >> (index % 64)) & 1);
-}
-
-static void hornet_set_bit(uint64_t *bits, uint32_t index, int value) {
-    if (value) {
-        bits[index / 64] |= (uint64_t)1 << (index % 64);
-    } else {
-        bits[index / 64] &= ~((uint64_t)1 << (index % 64));
-    }
-}
-
-static void hornet_read_settings(void) {
-    hornet_settings_read = 1;
+// Before the first allocation: the settings, and the class tables.
+static void hornet_heap_start(void) {
+    hornet_started = 1;
     const char *stress = getenv("HORNET_GC_STRESS");
     hornet_stress_every = stress != NULL ? strtoll(stress, NULL, 10) : 0;
+    if (hornet_stress_every > 0) {
+        hornet_collect_at = -1;
+    }
     const char *poison = getenv("HORNET_GC_POISON");
     hornet_poison = poison != NULL && strcmp(poison, "0") != 0;
+    int class = 0;
+    for (int64_t size = 0; size <= HORNET_LARGEST_SMALL; size += size < HORNET_FINE_CLASSES ? 8 : 128) {
+        while (hornet_classes[class] < size) {
+            class++;
+        }
+        if (size <= HORNET_FINE_CLASSES) {
+            hornet_class_by_8[size >> 3] = (uint8_t)class;
+        }
+        if (size >= HORNET_FINE_CLASSES) {  // (1024 itself is in both; 1025 to 1152 round up to 1152)
+            hornet_class_by_128[size >> 7] = (uint8_t)class;
+        }
+    }
 }
 
-// Take a page of a class's objects from the C library: NULL if there is no memory.
+// A page of a class's objects: NULL if there is no memory.
 static struct hornet_page *hornet_new_small_page(int class, int holds_pointers, int64_t size_for_message) {
-    void *memory = hornet_get_pages(HORNET_PAGE_SIZE);
+    void *memory = hornet_get_page();
     if (memory == NULL) {
         return NULL;
     }
+    uint32_t object_size = hornet_classes[class];
     struct hornet_page *page =
-        hornet_new_record((uintptr_t)memory, 1, (uint32_t)(HORNET_PAGE_SIZE / hornet_classes[class]), size_for_message);
-    page->object_size = hornet_classes[class];
+        hornet_new_record((uintptr_t)memory, 1, (uint32_t)(HORNET_PAGE_SIZE / object_size), size_for_message);
+    page->object_size = object_size;
+    page->reciprocal = (((uint64_t)1 << 32) + object_size - 1) / object_size;
+    page->class = class;
     page->holds_pointers = holds_pointers;
     return page;
 }
 
-// A slot of the class (an object's room) from a page with room, or a new page; NULL if there is no
-// memory for one.
-static void *hornet_take_slot(int class, int holds_pointers, int64_t size_for_message) {
-    struct hornet_page **with_room = &hornet_with_room[holds_pointers][class];
-    while (*with_room != NULL && (*with_room)->free == NULL && (*with_room)->fresh == (*with_room)->slots) {
-        *with_room = (*with_room)->next;  // (full: off the list)
-    }
-    struct hornet_page *page = *with_room;
-    if (page == NULL) {
-        page = hornet_new_small_page(class, holds_pointers, size_for_message);
-        if (page == NULL) {
-            return NULL;
-        }
-        *with_room = page;
-    }
+// A slot of `page`'s, freed or never used, marked allocated; NULL if it is full.
+static inline __attribute__((always_inline)) char *hornet_slot_of(struct hornet_page *page) {
+    char *slot = page->free;
     uint32_t index;
-    char *slot;
-    if (page->free != NULL) {
-        slot = page->free;
+    if (slot != NULL) {
         memcpy(&page->free, slot, sizeof page->free);
-        index = (uint32_t)(((uintptr_t)slot - page->start) / page->object_size);
-    } else {
+        index = (uint32_t)(((uintptr_t)slot - page->start) * page->reciprocal >> 32);
+    } else if (page->fresh < page->slots) {
         index = page->fresh++;
         slot = (char *)page->start + (size_t)index * page->object_size;
+    } else {
+        return NULL;
     }
-    hornet_set_bit(page->allocated, index, 1);
+    page->allocated[index / 64] |= (uint64_t)1 << (index % 64);
     page->live++;
     return slot;
 }
 
+#define HORNET_FALLTHROUGH __attribute__((fallthrough))
+
+// Zero a slot of `span` bytes (a multiple of 8): the smallest, the commonest, word by word, as a call
+// to memset would cost more than the zeroing.
+static inline __attribute__((always_inline)) void hornet_zero_slot(char *slot, int64_t span) {
+    uint64_t *words = (uint64_t *)(void *)slot;
+    switch (span >> 3) {
+    case 8: words[7] = 0; HORNET_FALLTHROUGH;
+    case 7: words[6] = 0; HORNET_FALLTHROUGH;
+    case 6: words[5] = 0; HORNET_FALLTHROUGH;
+    case 5: words[4] = 0; HORNET_FALLTHROUGH;
+    case 4: words[3] = 0; HORNET_FALLTHROUGH;
+    case 3: words[2] = 0; HORNET_FALLTHROUGH;
+    case 2: words[1] = 0; HORNET_FALLTHROUGH;
+    case 1: words[0] = 0; break;
+    default: memset(slot, 0, (size_t)span);
+    }
+}
+
+// A slot of the class from a page with room, or a new page; NULL if there is no memory for one.
+static void *hornet_take_slot(int class, int holds_pointers, int64_t size_for_message) {
+    struct hornet_page **with_room = &hornet_with_room[holds_pointers][class];
+    for (;;) {
+        if (*with_room == NULL) {
+            *with_room = hornet_new_small_page(class, holds_pointers, size_for_message);
+            if (*with_room == NULL) {
+                return NULL;
+            }
+        }
+        char *slot = hornet_slot_of(*with_room);
+        if (slot != NULL) {
+            return slot;
+        }
+        *with_room = (*with_room)->next;  // (full: off the list)
+    }
+}
+
 static void *hornet_take_large(int64_t size, int holds_pointers) {
     size_t pages = ((size_t)size + HORNET_PAGE_SIZE - 1) >> HORNET_PAGE_SHIFT;
-    void *memory = hornet_get_pages(pages << HORNET_PAGE_SHIFT);
+    void *memory = pages == 1 ? hornet_get_page() : hornet_get_pages(pages << HORNET_PAGE_SHIFT);
     if (memory == NULL) {
         return NULL;
     }
@@ -252,23 +315,23 @@ static void *hornet_take_large(int64_t size, int holds_pointers) {
     return memory;
 }
 
-void *hornet__heap_alloc(int64_t size, int holds_pointers, int zeroed) {
+// Everything but the commonest case (hornet__heap_alloc's).
+__attribute__((noinline)) static void *hornet_alloc_slow(int64_t size, int holds_pointers, int zeroed) {
     if (size < 0 || (uint64_t)size > (uint64_t)PTRDIFF_MAX - HORNET_PAGE_SIZE) {
         hornet__out_of_memory(size, -1);
     }
-    if (!hornet_settings_read) {
-        hornet_read_settings();
+    if (!hornet_started) {
+        hornet_heap_start();
     }
     int small = size <= HORNET_LARGEST_SMALL;
     int class = small ? hornet_class_of(size) : 0;
     int64_t span = small ? (int64_t)hornet_classes[class] : size;  // what the collector would look through
-    if (hornet_allocated_since + span > hornet_collect_at
+    if (hornet_allocated_since + span > hornet_threshold
         || (hornet_stress_every > 0 && ++hornet_stress_count % hornet_stress_every == 0)) {
         hornet__gc_collect();
     }
-    holds_pointers = holds_pointers != 0;
     void *object;
-    for (int asked = 0;; asked++) {  // (one place each is taken from, for the compiler to inline)
+    for (int asked = 0;; asked++) {
         object = small ? hornet_take_slot(class, holds_pointers, size) : hornet_take_large(size, holds_pointers);
         if (object != NULL) {
             break;
@@ -276,16 +339,47 @@ void *hornet__heap_alloc(int64_t size, int holds_pointers, int zeroed) {
         if (asked == 1) {
             hornet__out_of_memory(size, -1);
         }
-        hornet__gc_collect();  // refused: collect, and ask once more
+        hornet__gc_collect();  // refused: collect, give back every empty page, and ask once more
+        hornet_give_back_empty_pages(0);
     }
     hornet_allocated_since += span;
-    // Memory that may hold pointers is all zero, so that what it held before is never taken for one.
     if (holds_pointers) {
-        memset(object, 0, (size_t)span);
+        hornet_zero_slot(object, span);
     } else if (zeroed) {
         memset(object, 0, (size_t)size);
     }
     return object;
+}
+
+void *hornet__heap_alloc(int64_t size, int holds_pointers, int zeroed) {
+    holds_pointers = holds_pointers != 0;
+    if ((uint64_t)size <= HORNET_LARGEST_SMALL) {  // (a negative size isn't)
+        int class = hornet_class_of(size);
+        int64_t span = hornet_classes[class];
+        struct hornet_page *page = hornet_with_room[holds_pointers][class];
+        if (page != NULL && hornet_allocated_since + span <= hornet_collect_at) {
+            char *slot = hornet_slot_of(page);
+            if (slot != NULL) {
+                hornet_allocated_since += span;
+                // Memory that may hold pointers is all zero, so that what it held before is never
+                // taken for one.
+                if (holds_pointers) {
+                    hornet_zero_slot(slot, span);
+                } else if (zeroed) {
+                    memset(slot, 0, (size_t)size);
+                }
+                return slot;
+            }
+        }
+    }
+    return hornet_alloc_slow(size, holds_pointers, zeroed);
+}
+
+int64_t hornet__heap_slot_size(int64_t size) {
+    if (!hornet_started) {
+        hornet_heap_start();
+    }
+    return size <= HORNET_LARGEST_SMALL ? (int64_t)hornet_classes[hornet_class_of(size)] : size;
 }
 
 static struct hornet_page *hornet_page_of(uintptr_t address) {
@@ -299,7 +393,7 @@ static struct hornet_page *hornet_page_of(uintptr_t address) {
 
 // The page `address` is in, and its object's index there (0 for a large object): 0 if it isn't in
 // an object that is allocated.
-static int hornet_locate(uintptr_t address, struct hornet_page **found_page, uint32_t *found_index) {
+static inline int hornet_locate(uintptr_t address, struct hornet_page **found_page, uint32_t *found_index) {
     struct hornet_page *page = hornet_page_of(address);
     if (page == NULL) {
         return 0;
@@ -310,10 +404,10 @@ static int hornet_locate(uintptr_t address, struct hornet_page **found_page, uin
         *found_index = 0;
         return offset < (uintptr_t)page->large_size;  // (not the rest of its last page)
     }
-    uint32_t index = (uint32_t)(offset / page->object_size);
+    uint32_t index = (uint32_t)(offset * page->reciprocal >> 32);
     *found_page = page;
     *found_index = index;
-    return index < page->slots && hornet_bit(page->allocated, index);
+    return index < page->slots && ((page->allocated[index / 64] >> (index % 64)) & 1);
 }
 
 int hornet__heap_find(uintptr_t address, struct hornet_heap_object *found) {
@@ -335,7 +429,7 @@ int hornet__heap_find(uintptr_t address, struct hornet_heap_object *found) {
 
 // If `word` is the address of (anywhere in) an object not yet found, mark it found; and if it may
 // hold pointers, keep it to be looked through.
-static void hornet_mark_word(uintptr_t word) {
+static inline void hornet_mark_word(uintptr_t word) {
     struct hornet_page *page;
     uint32_t index;
     if (!hornet_locate(word, &page, &index)) {
@@ -347,10 +441,11 @@ static void hornet_mark_word(uintptr_t word) {
         }
         page->large_marked = 1;
     } else {
-        if (hornet_bit(page->marked, index)) {
+        uint64_t bit = (uint64_t)1 << (index % 64);
+        if (page->marked[index / 64] & bit) {
             return;
         }
-        hornet_set_bit(page->marked, index, 1);
+        page->marked[index / 64] |= bit;
     }
     if (page->holds_pointers) {
         if (hornet_mark_count == hornet_mark_room) {
@@ -381,8 +476,12 @@ static void hornet_mark_word(uintptr_t word) {
 #endif
 
 HORNET_NO_SANITIZE static void hornet_mark_range(uintptr_t low, uintptr_t high) {
+    uintptr_t heap_low = hornet_heap_low, heap_span = hornet_heap_high - hornet_heap_low;  // (fixed while marking)
     for (uintptr_t at = (low + 7) & ~(uintptr_t)7; at + sizeof(uintptr_t) <= high; at += sizeof(uintptr_t)) {
-        hornet_mark_word(*(const uintptr_t *)at);
+        uintptr_t word = *(const uintptr_t *)at;
+        if (word - heap_low < heap_span) {  // most words that aren't pointers go no further
+            hornet_mark_word(word);
+        }
     }
 }
 
@@ -415,7 +514,20 @@ static void hornet_mark_from_roots(void) {
     }
 }
 
-// Free each object not marked, and clear the marks; give back pages with nothing left. The pages
+// A page (or a large object's pages) with nothing on it: out of the table, its record freed, and
+// the memory kept or given back.
+static void hornet_empty(struct hornet_page *page, size_t pages) {
+    hornet_record_pages(page->start, pages, NULL, 0);
+    hornet_stats.pages -= (int64_t)pages;
+    if (pages == 1) {
+        hornet_keep_empty_page((void *)page->start);
+    } else {
+        hornet_free_pages((void *)page->start);
+    }
+    free(page);
+}
+
+// Free each object not marked, and clear the marks; empty pages are kept or given back. The pages
 // with room are listed afresh.
 static void hornet_sweep(void) {
     int64_t live_bytes = 0;
@@ -430,17 +542,14 @@ static void hornet_sweep(void) {
                 hornet_pages[kept++] = page;
                 continue;
             }
-            size_t pages = ((size_t)page->large_size + HORNET_PAGE_SIZE - 1) >> HORNET_PAGE_SHIFT;
             if (hornet_poison) {
                 memset((void *)page->start, 0xdb, (size_t)page->large_size);
             }
-            hornet_record_pages(page->start, pages, NULL, 0);
-            hornet_free_pages((void *)page->start);
-            hornet_stats.pages -= pages;
             hornet_stats.freed_bytes += page->large_size;
-            free(page);
+            hornet_empty(page, ((size_t)page->large_size + HORNET_PAGE_SIZE - 1) >> HORNET_PAGE_SHIFT);
             continue;
         }
+        uint32_t freed = 0;
         for (uint32_t word = 0; word * 64 < page->fresh; word++) {
             uint64_t garbage = page->allocated[word] & ~page->marked[word];
             page->allocated[word] &= page->marked[word];
@@ -454,28 +563,29 @@ static void hornet_sweep(void) {
                 }
                 memcpy(slot, &page->free, sizeof page->free);
                 page->free = slot;
-                page->live--;
-                hornet_stats.freed_bytes += page->object_size;
+                freed++;
             }
         }
-        if (page->live == 0) {  // nothing left on it: back to the C library
-            hornet_record_pages(page->start, 1, NULL, 0);
-            hornet_free_pages((void *)page->start);
-            hornet_stats.pages -= 1;
-            free(page);
+        page->live -= freed;
+        hornet_stats.freed_bytes += (int64_t)freed * page->object_size;
+        if (page->live == 0) {
+            hornet_empty(page, 1);
             continue;
         }
         live_bytes += (int64_t)page->live * page->object_size;
         if (page->free != NULL || page->fresh < page->slots) {
-            int class = hornet_class_of(page->object_size);
-            page->next = hornet_with_room[page->holds_pointers][class];
-            hornet_with_room[page->holds_pointers][class] = page;
+            page->next = hornet_with_room[page->holds_pointers][page->class];
+            hornet_with_room[page->holds_pointers][page->class] = page;
         }
         hornet_pages[kept++] = page;
     }
     hornet_page_count = kept;
+    int64_t keep_bytes = live_bytes / 4 > (1 << 20) ? live_bytes / 4 : (1 << 20);
+    hornet_give_back_empty_pages(keep_bytes >> HORNET_PAGE_SHIFT);
     hornet_stats.live_bytes = live_bytes;
-    hornet_collect_at = live_bytes > (8 << 20) ? live_bytes : (8 << 20);
+    hornet_stats.empty_pages = hornet_empty_count;
+    hornet_threshold = live_bytes > (8 << 20) ? live_bytes : (8 << 20);
+    hornet_collect_at = hornet_stress_every > 0 ? -1 : hornet_threshold;
     hornet_allocated_since = 0;
 }
 
@@ -487,4 +597,5 @@ void hornet__gc_collect(void) {
 
 void hornet__heap_stats(struct hornet_heap_stats *stats) {
     *stats = hornet_stats;
+    stats->empty_pages = hornet_empty_count;
 }

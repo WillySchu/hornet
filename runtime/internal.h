@@ -98,11 +98,15 @@ void hornet__gc_collect(void);
 
 struct hornet_heap_stats {
     int64_t collections;
-    int64_t pages;        // the heap's 64 KB pages now
+    int64_t pages;        // the heap's 64 KB pages in use now
+    int64_t empty_pages;  // and those kept empty, for reuse
     int64_t live_bytes;   // in objects (their slots) that the last collection kept
     int64_t freed_bytes;  // by every collection so far
 };
 void hornet__heap_stats(struct hornet_heap_stats *stats);
+
+// The room an object of `size` bytes is given: its size class, or `size` itself if it is large.
+int64_t hornet__heap_slot_size(int64_t size);
 
 // The runtime's own scratch memory.
 void *hornet__scratch_alloc(int64_t size);

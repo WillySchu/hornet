@@ -3,7 +3,8 @@ tests on this machine's own target. `pytest --full`: adds every runnable target 
 Rosetta 2) and the slow tests (benchmark reruns and runner, scrambled formatter programs,
 sanitizers). HORNET_E2E_TARGETS overrides the targets in any tier. `--gc-stress`, with either of the
 last two: every program built and run collects garbage before each allocation and poisons what it
-frees (HORNET_GC_STRESS, HORNET_GC_POISON: runtime/heap.c), to show a pointer the collector missed."""
+frees (HORNET_GC_STRESS, HORNET_GC_POISON: runtime/heap.c), to show a pointer the collector missed. (Every
+10th allocation under qemu and Wine: tests/targets.py.)"""
 
 import inspect
 import os

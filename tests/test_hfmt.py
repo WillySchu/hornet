@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from build import build_executable, run_prefix
+from build import build_executable
 from lexer import Lexer, TokenType
 from tests.test_compiler import GCC_SKIP
-from tests.targets import E2E_TARGETS
+from tests.targets import E2E_TARGETS, program_prefix
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = sorted(
@@ -21,7 +21,7 @@ def hfmt(request, tmp_path_factory):
     """Command running hfmt built for each E2E target (under qemu for a foreign architecture)."""
     exe = tmp_path_factory.mktemp(f'hfmt-{request.param}') / 'hfmt'
     build_executable(str(ROOT / 'tools' / 'hfmt' / 'main.ht'), str(exe), target=request.param)
-    return run_prefix(request.param) + [str(exe)]
+    return program_prefix(request.param) + [str(exe)]
 
 
 def _run(hfmt, *args, stdin=None):
