@@ -1,0 +1,52 @@
+# Time: the system's clock, and one that only goes forward.
+extern int hornet_time_ms()
+extern int hornet_monotonic_ms()
+
+# A moment in UTC, broken down.
+type DateTime struct:
+    int year
+    int month  # 1 to 12
+    int day  # 1 to 31
+    int hour
+    int minute
+    int second
+    int millisecond
+    int weekday  # 0 (Sunday) to 6
+
+# Milliseconds since 1970-01-01 00:00 UTC, by the system's clock (which can be set back).
+def int now_ms():
+    return hornet_time_ms()
+
+# Milliseconds since some fixed time, never going back: for how long something takes.
+def int monotonic_ms():
+    return hornet_monotonic_ms()
+
+# a / b, rounded down rather than toward zero (b positive).
+def int _floor_div(int a, int b):
+    int q = a / b
+    if a % b < 0:
+        q -= 1
+    return q
+
+# `ms` (since 1970-01-01 00:00 UTC, earlier if negative) as a date and time, in the Gregorian
+# calendar throughout.
+def DateTime utc(int ms):
+    int days = _floor_div(ms, 86400000)
+    int in_day = ms - days * 86400000
+    # (Days to the civil date: H. Hinnant's algorithm, years counted from March, in 400-year eras.)
+    int z = days + 719468
+    int era = _floor_div(z, 146097)
+    int of_era = z - era * 146097
+    int year_of_era = (of_era - of_era / 1460 + of_era / 36524 - of_era / 146096) / 365
+    int of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100)
+    int shifted_month = (5 * of_year + 2) / 153  # 0 is March
+    int day = of_year - (153 * shifted_month + 2) / 5 + 1
+    int month = shifted_month + 3
+    if month > 12:
+        month -= 12
+    int year = year_of_era + era * 400
+    if month <= 2:
+        year += 1
+    int weekday = (days + 4) - _floor_div(days + 4, 7) * 7  # 1970-01-01 was a Thursday
+    int hour = in_day / 3600000
+    return DateTime(year, month, day, hour, in_day / 60000 % 60, in_day / 1000 % 60, in_day % 1000, weekday)

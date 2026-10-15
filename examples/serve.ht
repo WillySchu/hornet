@@ -1,0 +1,106 @@
+# serve [DIRECTORY [PORT]]: serve the files under DIRECTORY (default '.') on 127.0.0.1:PORT (default
+# 8000; 0 for any free port), logging each request to standard output. A path ending in '/' is its
+# index.html, and a directory's path without one is sent to it.
+from 'std:errors' import Error, IntResult, StrResult
+from 'std:fmt' import int_to_str, parse_int
+from 'std:http' import listen, Header, Request, RequestResult, Response, ServerResult
+from 'std:os' import exists, get_args, read_file, write_stderr
+from 'std:strings' import ends_with, index_of_byte, lower, split
+
+def str content_type(str path):
+    str name = lower(path)
+    int dot = -1
+    for i, c in name:
+        if c == ".":
+            dot = i
+        elif c == "/":
+            dot = -1
+    if dot < 0:
+        return 'application/octet-stream'
+    str extension = name[dot + 1:]
+    if extension == 'html' or extension == 'htm':
+        return 'text/html; charset=utf-8'
+    if extension == 'css':
+        return 'text/css; charset=utf-8'
+    if extension == 'js' or extension == 'mjs':
+        return 'text/javascript; charset=utf-8'
+    if extension == 'json':
+        return 'application/json'
+    if extension == 'txt' or extension == 'ht':
+        return 'text/plain; charset=utf-8'
+    if extension == 'md':
+        return 'text/markdown; charset=utf-8'
+    if extension == 'svg':
+        return 'image/svg+xml'
+    if extension == 'png':
+        return 'image/png'
+    if extension == 'jpg' or extension == 'jpeg':
+        return 'image/jpeg'
+    if extension == 'gif':
+        return 'image/gif'
+    if extension == 'webp':
+        return 'image/webp'
+    if extension == 'ico':
+        return 'image/x-icon'
+    if extension == 'wasm':
+        return 'application/wasm'
+    if extension == 'pdf':
+        return 'application/pdf'
+    return 'application/octet-stream'
+
+# Whether a request's path stays under the directory served: no '..', and nothing a system would read
+# as a drive or another root.
+def bool safe(str path):
+    if index_of_byte(path, "\\") >= 0 or index_of_byte(path, ":") >= 0:
+        return false
+    for part in split(path, '/'):
+        if part == '..':
+            return false
+    return true
+
+def Response text(int status, []Header headers, str body):
+    return Response(status, '', append(headers, Header('Content-Type', 'text/plain; charset=utf-8')), body)
+
+def Response answer(str directory, Request r):
+    if r.method != 'GET' and r.method != 'HEAD':
+        return text(405, [Header('Allow', 'GET, HEAD')], 'Method Not Allowed\n')
+    if not safe(r.path):
+        return text(404, [], 'Not Found\n')
+    str path = r.path
+    if ends_with(path, '/'):
+        path = path + 'index.html'
+    StrResult contents = read_file(directory + path)
+    if contents is Error:
+        if exists(directory + path + '/index.html'):  # a directory, named without its '/'
+            return text(301, [Header('Location', r.path + '/')], 'Moved Permanently\n')
+        return text(404, [], 'Not Found\n')
+    return Response(200, '', [Header('Content-Type', content_type(path))], contents)
+
+def int main(int argc, *byte argv):
+    []str args = get_args(argc, argv)
+    if len(args) > 3:
+        _ = write_stderr('usage: serve [DIRECTORY [PORT]]\n')
+        return 2
+    str directory = '.'
+    if len(args) > 1:
+        directory = args[1]
+    int port = 8000
+    if len(args) > 2:
+        IntResult given = parse_int(args[2])
+        if given is Error:
+            _ = write_stderr('serve: ' + given.message + '\n')
+            return 2
+        port = given
+    ServerResult server = listen('127.0.0.1', port)
+    if server is Error:
+        _ = write_stderr('serve: ' + server.message + '\n')
+        return 1
+    print('serving ' + directory + ' on http://127.0.0.1:' + int_to_str(server.port()) + '/')
+    while true:
+        RequestResult r = server.next()
+        if r is Error:
+            _ = write_stderr('serve: ' + r.message + '\n')
+            return 1
+        Response response = answer(directory, r)
+        print(r.method + ' ' + r.target + ' ' + int_to_str(response.status))
+        _ = server.respond(r, response)

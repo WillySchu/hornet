@@ -123,11 +123,17 @@ def test_hornet_runtime_entry_points_are_the_only_external_symbols(target):
         "hornet_rename",
         "hornet_slice_grow",
         "hornet_slice_grow_atomic",
+        "hornet_monotonic_ms",
         "hornet_system_error",
+        "hornet_tcp_accept",
         "hornet_tcp_close",
         "hornet_tcp_connect",
+        "hornet_tcp_finish",
+        "hornet_tcp_listen",
+        "hornet_tcp_local_port",
         "hornet_tcp_read",
         "hornet_tcp_write",
+        "hornet_time_ms",
         "hornet_write_fd",
     ]
     expected_names = [f"_{n}" for n in names] if target.os == 'macos' else names
