@@ -14,7 +14,6 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
-- Pages that become empty go straight back to the C library, so a program that keeps filling and emptying the heap allocates new pages each cycle. Keeping a few empty pages would help; worth deciding during step three’s memory-limit tests.
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
 - Stdlib for the port. Integer parsing and path helpers.
 - Weight spills by use count and loop depth.
