@@ -160,8 +160,7 @@ def server(tmp_path_factory):
     """A SERVER on the host, taking bodies of up to 1000 bytes, and quiet clients for 500 ms."""
     running = Running(host_target(), [_built(tmp_path_factory, SERVER, host_target()), 1000, 500])
     yield running
-    if running.process.poll() is None:
-        running.kill()
+    assert running.stop()[0] == 0
 
 
 def _get(server, path: str, headers=None):
@@ -272,9 +271,16 @@ def test_a_client_that_goes_quiet_or_closes_is_passed_over(server):
     assert _status(_request(server.port, b"GET /hello HTTP/1.1\r\n\r\n", pause=0.3)) == 200
 
 
-def test_what_respond_refuses(server):
-    assert _request(server.port, b"GET /bad-header HTTP/1.1\r\n\r\n") == b""
-    assert _request(server.port, b"GET /interim HTTP/1.1\r\n\r\n") == b""
+def test_what_respond_refuses_is_an_error_and_nothing_is_sent(tmp_path_factory):
+    # (A server of its own: what it prints is checked, and pytest -n may run tests of one module apart.)
+    running = Running(host_target(), [_built(tmp_path_factory, SERVER, host_target()), 1000, 500])
+    try:
+        assert _request(running.port, b"GET /bad-header HTTP/1.1\r\n\r\n") == b""
+        assert _request(running.port, b"GET /interim HTTP/1.1\r\n\r\n") == b""
+        assert running.stop() == (0, "respond: malformed header 'X-Bad'\nrespond: not a final HTTP status: 100\n", "")
+    finally:
+        if running.process.poll() is None:
+            running.kill()
 
 
 def test_many_requests_one_after_another(server):
@@ -293,10 +299,6 @@ def test_many_requests_one_after_another(server):
     for t in threads:
         t.join()
     assert len(results) == 20
-
-
-def test_zz_it_stops_and_reports_what_respond_refused(server):  # (last: it stops the module's server)
-    assert server.stop() == (0, "respond: malformed header 'X-Bad'\nrespond: not a final HTTP status: 100\n", "")
 
 
 def test_the_server_on_every_target(tmp_path_factory):
