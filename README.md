@@ -79,7 +79,10 @@ Run the test suite from the repository root:
 pytest           # unit tests, plus end-to-end tests on the host target
 pytest --quick   # unit tests only; nothing is built or run
 pytest --full    # every runnable target, plus slow tests (benchmark reruns, formatter fuzzing, sanitizers)
+pytest --gc-stress  # with the standard or --full tier: collect before every allocation, poison what is freed
 ```
+
+`--gc-stress` makes a pointer the collector misses show. Under qemu and Wine, programs collect before every 10th allocation instead.
 
 The tests cover the lexer, parser, semantic analysis, modules, IR construction and verification, optimization, the native backend, escape analysis, runtime behavior, and end-to-end compiled programs, including seeded random programs checked against a Python model. The networking library is tested against a server on the same machine; nothing leaves it.
 
@@ -1187,6 +1190,8 @@ Hornet's `int` is 64-bit; declare C `int` parameters and results as `int32` (for
 
 Foreign calls use the same IR call and backend calling-convention machinery as ordinary Hornet function calls.
 
+The collector sees only the stack, the registers, and the heap: C code must not keep the only pointer to Hornet memory (in a global, or in memory of its own).
+
 ## Intrinsics
 
 `intrinsic` declarations are reserved for a small, fixed set of compiler-recognized operations:
@@ -1340,7 +1345,8 @@ It currently provides language-level services including:
 * the panic routines (`hornet_panic`, `hornet_panic_at` for `panic(...)`, and those that add the values a failed check compared), which flush standard output, write the message to standard error, and abort (`SIGABRT`; on Windows, exit code 3)
 * catching a stack overflow, to report it as a panic that names the function
 * TCP sockets for `stdlib/net.ht` (`hornet_tcp_connect`, `hornet_tcp_read`, `hornet_tcp_write`, `hornet_tcp_close`, and `hornet_net_error` for why one failed), since C's sockets differ between systems; on Windows the program is linked with `ws2_32`
-* memory: `hornet_alloc` and `hornet_alloc_zeroed`, and their `_atomic` versions for memory that holds no pointer (so that a collector need not look through it), which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
+* memory: `hornet_alloc` and `hornet_alloc_zeroed`, and their `_atomic` versions for memory that holds no pointer (so that the collector need not look through it), which every allocation goes through, the compiled code's and the runtime's own, and which panic when memory is refused
+* the heap and its garbage collector (`heap.c`)
 * `format`'s buffer (`hornet_format_begin`, `hornet_format_text`, `hornet_format_value`)
 * `hornet_slice_grow` (and `_atomic`), which copies a slice into a larger backing store
 * `hornet_bytes` for `bytes(s)`
@@ -1352,7 +1358,9 @@ Runtime checks panic with `file:line:col: panic: message`, the position being wh
 
 Running out of stack is a panic too: `panic: stack overflow in 'depth'`. It has no position, since the runtime only catches the fault (with a signal handler on a stack of its own; on Windows, an exception handler), but it names the program's function that was running: the one the fault was in, or the nearest that called the C it was in. The compiler writes a table of each function's start, end, and name for this. On Linux a stack with no limit (`ulimit -s unlimited`) has no end to detect.
 
-Being refused memory is one as well: `panic: out of memory (allocating 1048576 bytes)`. A system that grants memory it doesn't have, as Linux does by default, kills the program when the memory is used instead, and that can't be caught.
+Being refused memory is one as well: `panic: out of memory (allocating 1048576 bytes)`, after a collection hasn't freed enough. A system that grants memory it doesn't have, as Linux does by default, kills the program when the memory is used instead, and that can't be caught.
+
+The heap is 64 KB pages from the C library: objects up to 32 KB in pages of one size class (8 bytes to 32 KB, about a quarter apart), larger ones in runs of pages to themselves. Its collector is a conservative, non-moving mark-sweep: any word on the stack or in the registers (the only roots, as there are no globals) that points into an object keeps it, as do the words of each object kept that may hold pointers; the rest is freed. It runs when as much has been allocated as was alive after the last collection (8 MB at least). Empty pages are kept for reuse, up to a quarter of what is alive (1 MB at least). `HORNET_GC_STRESS=N` collects before every Nth allocation, and `HORNET_GC_POISON=1` fills what is freed with `0xdb`.
 
 The runtime is deliberately separate from the native backends. The compiler is responsible for semantic operations such as type checking, aggregate layout, address calculation, and bounds-check generation; the runtime implements selected algorithms and services that are better expressed as ordinary native code.
 
@@ -1415,7 +1423,7 @@ Both frontend stages are packages. The parser (`parser/`) is functions over a to
 
 The frontend constructs a complete `IRProgram` before a backend begins lowering it. Only the functions `main` can reach through calls are built: every function is type-checked, but one that can never run is not compiled, and neither are the strings and descriptors only it uses, so importing a module costs what is used of it. (Calls are all resolved by then, and nothing else can call a function. A program without `main` keeps every function.) The IR is independent of any target: a function's incoming arguments are an ordered list of word-sized temporaries in Hornet's own calling convention (a composite return value's destination address first, then one word per parameter, except two for `str` and three for slices, with arrays, structs, sum types, and dicts passed by address), and where each word physically arrives is decided by the backend. Lowering never modifies the IR. An enum value reaches the IR as an `int32`.
 
-Escape analysis decides which locals, slice literals, and `&S(...)` literals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is never freed. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x`, `[a, b]`, or `&Point(a, b)` to a function that doesn't keep it leaves it on the stack (a variadic call's packed arguments are a slice literal). Storage made in a loop also needs the heap when something from outside the loop, or the loop's own variable, may hold it into a later iteration.
+Escape analysis decides which locals, slice literals, and `&S(...)` literals must live on the heap; heap storage comes from the runtime's `hornet_alloc` and is freed by the collector once nothing points to it. It is a flow-insensitive points-to analysis per function, run on the typed tree, with per-parameter escape summaries so that passing `&x`, `[a, b]`, or `&Point(a, b)` to a function that doesn't keep it leaves it on the stack (a variadic call's packed arguments are a slice literal). Storage made in a loop also needs the heap when something from outside the loop, or the loop's own variable, may hold it into a later iteration.
 
 IR construction compiles conditions made of `and`, `or`, and `not` straight to branches, and copies a composite value directly between places (two places of one type are the same storage or disjoint). A deferred call's operands are stored in variables of their own where the `defer` is, and the call is emitted on each path out of its block, so nothing about it is decided at run time. Loads, stores, and copies address memory as a base plus a constant offset.
 
@@ -1453,7 +1461,7 @@ optimize/          IR optimization passes
 
 target.py          Compilation targets (arch-os)
 backend/           Native backends: common/ shared pieces, x86_64/ and aarch64/
-runtime/           Native Hornet runtime
+runtime/           Native Hornet runtime, including the heap and its collector
 stdlib/            Hornet standard-library modules
 
 examples/          Example Hornet programs (`calc/` and `json/` are multi-file ones; `fetch.ht` is an HTTP client)
@@ -1588,7 +1596,8 @@ Hornet is still experimental. Some notable limitations are:
 * Generic types and generic functions are not implemented.
 * First-class function types and closures are not implemented.
 * Calls to C's variadic functions (such as `printf`) are not supported.
-* There is no garbage collector yet; string concatenation in particular never frees its intermediate strings.
+* The collector is conservative: a number that looks like a pointer into an object keeps it.
+* The collector finds the top of the stack with glibc's `__libc_stack_end` on Linux, so other C libraries (musl) aren't supported; on Windows it needs Windows 8 or later.
 * There are no floating-point types yet.
 * There is no TLS: `stdlib/http.ht` makes plain `http://` requests only.
 * Multithreading is not implemented.
@@ -1629,7 +1638,7 @@ port the native backend
 self-hosted compiler
 ```
 
-Garbage collection is not a prerequisite for bootstrapping the compiler. A compiler invocation can allocate compiler data for the duration of the process and rely on process termination to reclaim that memory. A GC would become important for general long-running programs and for the eventual memory-management model of the language.
+Garbage collection was not a prerequisite for bootstrapping the compiler, since a compiler invocation could rely on process termination to reclaim its memory; the runtime's collector now frees it as it goes, as it does for long-running programs.
 
 ---
 
@@ -1647,7 +1656,7 @@ Current and future work includes:
 * Interpolated string literals, and format options
 * Regex support
 * Richer FFI, including aggregate types where a stable ABI can be defined
-* Potential garbage collection and a more explicit ownership model
+* A more explicit ownership model
 * More IR optimizations, including common-subexpression and bounds-check elimination
 * Better aggregate copying and layout decisions
 * More sophisticated register allocation, including spill choices weighted by use count and loop depth

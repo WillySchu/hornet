@@ -35,7 +35,7 @@ Without `--compare`, results are diffed against `baseline.json` if it exists. Th
 
 ## Tests
 
-`tests/test_benchmarks.py` builds each program for each end-to-end target and checks its exit code. Under `pytest --full` it also runs each binary 10 times, to catch ASLR-dependent faults. It also runs the runner and checks that its stats add up, and with valgrind present it tests `--icount`. Every `.ht` file here needs an expected exit code there. Results are exit codes, so they stay in 0–255.
+`tests/test_benchmarks.py` builds each program for each end-to-end target and checks its exit code. Under `pytest --full` it also runs each binary 10 times, to catch ASLR-dependent faults. It also runs the runner and checks that its stats add up, and with valgrind present it tests `--icount`. Every `.ht` file here needs an expected exit code there. Results are exit codes, so they stay in 0–255. Under `--gc-stress`, a program that keeps much alive collects less often (`STRESS_EVERY` there), and the runner runs without it.
 
 ## Programs
 
@@ -43,6 +43,7 @@ Without `--compare`, results are diffed against `baseline.json` if it exists. Th
 | --- | --- |
 | `arithmetic_heavy` | Scalar arithmetic, unary operators, and narrowing casts in a hot loop; no calls |
 | `array_heavy` | Bubble sort, indexing into bare literals, array equality |
+| `binary_trees` | Many short-lived heap trees and one long-lived: allocation and collection |
 | `branchy` | `if`/`elif` chains, short-circuit `and`/`or`, Collatz loops |
 | `calling_convention_heavy` | Array, slice, and struct arguments; composite returns used directly |
 | `calls_in_loop` | Locals live across calls to a leaf function |
