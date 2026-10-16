@@ -14,6 +14,7 @@ Binary Ops:
 - Exponentiation (either ** or ^)
 
 Updates:
+- Panic recovery.
 - Literal-only expressions. int8 x = 1 + 2 is still rejected, because only a single literal adapts to a narrow type.
 - Stdlib for the port. Integer parsing and path helpers.
 - Weight spills by use count and loop depth.
