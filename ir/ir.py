@@ -164,6 +164,15 @@ class IRSliceBoundsCheck:
 
 
 @dataclass
+class IRSafepoint:
+    """Where a task may be stopped: if the runtime's flag is set, call into it (which keeps every
+    register). Placed after optimization, by optimize/safepoints.py. `slow` labels the call, placed
+    after the function's code, and `back` where it returns to."""
+    slow: str
+    back: str
+
+
+@dataclass
 class IRLabel:
     """Jump target."""
     name: str
@@ -196,6 +205,7 @@ IRInstr = Union[
     IRLocalAddress,
     IRMove,
     IRReturn,
+    IRSafepoint,
     IRSliceBoundsCheck,
     IRStaticDataAddress,
     IRStore,

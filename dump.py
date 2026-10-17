@@ -12,7 +12,7 @@ from enum import Enum
 import parser as syntax
 import typed_ast
 from ir.ir import (
-    IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
+    IRBinOp, IRBoundsCheck, IRBranch, IRSafepoint, IRCall, IRCast, IRConst, IRCopy, IRFunction, IRJump, IRLabel, IRLoad,
     IRLocalAddress, IRMove, IRNullCheck, IRProgram, IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore,
     IRUnOp,
 )
@@ -188,6 +188,8 @@ def _instruction(instr) -> str:
         text = f"check {_operand(instr.pointer)} is not none"
     elif isinstance(instr, IRBoundsCheck):
         text = f"check {_operand(instr.index)} < {_operand(instr.length)}"
+    elif isinstance(instr, IRSafepoint):
+        text = "safepoint"
     elif isinstance(instr, IRSliceBoundsCheck):
         text = f"check {_operand(instr.value)} <= {_operand(instr.bound)}"
     elif isinstance(instr, IRJump):

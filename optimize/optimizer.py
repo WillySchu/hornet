@@ -12,6 +12,7 @@ from optimize.dead_code import remove_dead_code
 from optimize.identity_reduction import reduce_identities
 from optimize.jump_threading import merge_blocks, thread_jumps
 from optimize.loop_inversion import invert_loops
+from optimize.safepoints import enabled as safepoints_enabled, place_safepoints
 from optimize.strength_reduction import reduce_strength
 
 MAX_ROUNDS = 10
@@ -46,5 +47,7 @@ def optimize(ir_program: IRProgram) -> IRProgram:
         optimize_function(ir_fn)
         if invert_loops(ir_fn, ir_program.ids):  # once, on settled code: see its module
             optimize_function(ir_fn)
+    if safepoints_enabled():  # (last: on the code as it will run)
+        place_safepoints(ir_program)
     verify_program(ir_program)  # a pass may break an invariant
     return ir_program

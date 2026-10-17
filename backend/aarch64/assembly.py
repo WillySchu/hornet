@@ -55,6 +55,20 @@ class SymPageOffset:
 
 
 @dataclass(frozen=True)
+class SymMem:
+    """[base, the offset of a global symbol within its page] (ldr/ldrb operand); the emitter applies
+    the target's symbol naming."""
+    base: Reg
+    name: str
+
+
+@dataclass(frozen=True)
+class GlobalPage:
+    """The 4 KB page of a global symbol (adrp operand), named as the target names it."""
+    name: str
+
+
+@dataclass(frozen=True)
 class Cond:
     """A condition code operand, e.g. `eq` in `cset w0, eq`."""
     name: str
@@ -67,7 +81,7 @@ class Shift:
     amount: int
 
 
-Operand = Union[Reg, Imm, Mem, FrameSlot, LabelRef, SymPage, SymPageOffset, Cond, Shift]
+Operand = Union[Reg, Imm, Mem, FrameSlot, LabelRef, SymPage, SymPageOffset, SymMem, GlobalPage, Cond, Shift]
 
 
 @dataclass

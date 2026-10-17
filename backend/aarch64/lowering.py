@@ -7,7 +7,8 @@ kept sign/zero-extended to 32 bits, as on x86-64.
 """
 
 from backend.aarch64.assembly import (
-    AddrOf, Call, Cond, FrameSlot, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset, FP,
+    AddrOf, Call, Cond, FrameSlot, GlobalPage, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymMem, SymPage,
+    SymPageOffset, FP,
 )
 from backend.aarch64.calling_convention import (
     ARG_REGISTERS, MAX_REGISTER_ARGS, SCRATCH_A, SCRATCH_ADDRESS, SCRATCH_B, SCRATCH_RESULT)
@@ -17,7 +18,7 @@ from ir.cfg import uses
 from ir.panics import located
 from ir.ir import (
     IRBinOp, IRBoundsCheck, IRBranch, IRCall, IRCast, IRCopy, IRConst, IRJump, IRLabel, IRLoad, IRLocalAddress, IRMove,
-    IRReturn, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
+    IRReturn, IRSafepoint, IRSliceBoundsCheck, IRStaticDataAddress, IRStore, IRUnOp, Temp,
 )
 from ops import BinaryOp, UnaryOp
 from typesys import Type, is_wide_type, type_byte_width
@@ -258,8 +259,21 @@ class Selector:
         else:
             self.emit('sxtw', dst, src.w)
 
+    def _safepoint(self, instr: IRSafepoint) -> None:
+        """The flag's check (in x16, scratch between instructions), branching to a call placed after
+        the function's code; the routine it calls keeps every register, and every function has
+        saved its link register, so nothing here moves."""
+        slow, back = instr.slow, instr.back
+        self.emit('adrp', SCRATCH_A.x, GlobalPage('hornet_preempt'))
+        self.emit('ldrb', SCRATCH_A.w, SymMem(SCRATCH_A.x, 'hornet_preempt'))
+        self.emit('cbnz', SCRATCH_A.w, LabelRef(slow))
+        self.out.append(LabelDef(back))
+        self.host.fail_blocks.append([LabelDef(slow), Call('hornet__safepoint_stub'), Instr('b', (LabelRef(back),))])
+
     def _lower_one(self, instr) -> None:
-        if isinstance(instr, IRLabel):
+        if isinstance(instr, IRSafepoint):
+            self._safepoint(instr)
+        elif isinstance(instr, IRLabel):
             self.out.append(LabelDef(instr.name))
         elif isinstance(instr, IRJump):
             self.emit('b', LabelRef(instr.label))

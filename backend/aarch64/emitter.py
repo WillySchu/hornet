@@ -1,7 +1,8 @@
 """AsmProgram -> GNU assembler text for AArch64 Linux (ELF) or macOS (Mach-O)."""
 
 from backend.aarch64.assembly import (
-    AsmFunction, AsmProgram, Call, Cond, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymPage, SymPageOffset,
+    AsmFunction, AsmProgram, Call, Cond, GlobalPage, Imm, Instr, LabelDef, LabelRef, Mem, Reg, Shift, SymMem, SymPage,
+    SymPageOffset,
 )
 from backend.common.function_table import end_label, table_lines
 from backend.common.text import escape_for_asciz
@@ -32,6 +33,12 @@ class Emitter:
             return f"{op.name}@PAGE" if self.os == 'macos' else op.name
         if isinstance(op, SymPageOffset):
             return f"{op.name}@PAGEOFF" if self.os == 'macos' else f":lo12:{op.name}"
+        if isinstance(op, GlobalPage):
+            return f"{self.symbol(op.name)}@PAGE" if self.os == 'macos' else op.name
+        if isinstance(op, SymMem):
+            if self.os == 'macos':
+                return f"[{op.base.name}, {self.symbol(op.name)}@PAGEOFF]"
+            return f"[{op.base.name}, :lo12:{op.name}]"
         if isinstance(op, Cond):
             return op.name
         if isinstance(op, Shift):

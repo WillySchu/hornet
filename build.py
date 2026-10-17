@@ -20,7 +20,7 @@ RUNTIME_DIR = REPO_ROOT / "runtime"
 # By name, so that a file left behind in runtime/ isn't built into it.
 RUNTIME_FILES = (
     "start.c", "stack.c", "stack_posix.c", "stack_windows.c", "memory.c", "heap.c", "panic.c", "format.c", "slice.c",
-    "dict.c", "io.c", "fs.c", "net.c", "system.c", "process_posix.c", "process_windows.c",
+    "dict.c", "io.c", "fs.c", "net.c", "system.c", "process_posix.c", "process_windows.c", "safepoint.c",
 )
 # The runtime's file that every program links whole: what runs before main is in it, and nothing
 # calls into it, so the linker would leave it out if it were taken from the archive with the rest.

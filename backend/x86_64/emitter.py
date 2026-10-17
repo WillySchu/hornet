@@ -1,6 +1,6 @@
 """AsmProgram -> AT&T assembly text."""
 
-from backend.x86_64.assembly_ast import AsmProgram, AsmFunction, CallInstr
+from backend.x86_64.assembly_ast import AsmProgram, AsmFunction, CallInstr, SafepointCheck
 from backend.common.function_table import end_label, table_lines
 from backend.common.text import escape_for_asciz
 from target import Target
@@ -47,6 +47,8 @@ class Emitter:
         for instr in fn.instructions:
             if isinstance(instr, CallInstr):
                 lines.append(f"    call    {self.symbol(instr.target)}")
+            elif isinstance(instr, SafepointCheck):
+                lines.append(f"    cmpb    $0, {self.symbol(instr.flag)}(%rip)")
             else:
                 lines.append(f"    {instr.emit()}")
         return lines + [f"{end_label(index)}:"] + (["    .seh_endproc"] if unwind else [])

@@ -230,6 +230,7 @@ def test_every_kind_of_instruction_is_printed_by_some_program():
         built = build_ir_program(analyze(entry, modules))
         seen |= {type(instr) for fn in built.functions for instr in fn.body}
         seen |= {type(instr) for fn in optimize(built).functions for instr in fn.body}
-    # (A null check is replaced by a branch as soon as its function is built: ir/null_checks.py.)
+    # (A null check is replaced by a branch as soon as its function is built: ir/null_checks.py. A
+    # safepoint is placed only with HORNET_SAFEPOINTS set, for now.)
     instructions = {c for c in vars(ir).values() if dataclasses.is_dataclass(c) and c.__name__.startswith('IR')}
-    assert instructions - {ir.IRFunction, ir.IRProgram, ir.IRConst, ir.IRNullCheck} <= seen
+    assert instructions - {ir.IRFunction, ir.IRProgram, ir.IRConst, ir.IRNullCheck, ir.IRSafepoint} <= seen

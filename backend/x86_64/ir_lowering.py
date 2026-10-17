@@ -59,6 +59,7 @@ from backend.x86_64.assembly_ast import (
     MovQ,
     Operand,
     Register,
+    SafepointCheck,
 )
 from ir.ir import (
     IRBinOp,
@@ -74,6 +75,7 @@ from ir.ir import (
     IRLocalAddress,
     IRMove,
     IRReturn,
+    IRSafepoint,
     IRSliceBoundsCheck,
     IRStaticDataAddress,
     IRStore,
@@ -474,6 +476,13 @@ class InstructionSelector:
             [Label(label)] + moves + [LeaQ(label=text, dst=as_qword_register(message)), CallInstr(instr.routine)])
         return label
 
+    def _safepoint(self, instr: IRSafepoint) -> list[Instruction]:
+        """The flag's check, branching to a call placed after the function's code; the routine it
+        calls keeps every register, so nothing here moves."""
+        slow, back = instr.slow, instr.back
+        self.host._bounds_check_fail_blocks.append([Label(slow), CallInstr('hornet__safepoint_stub'), Jmp(back)])
+        return [SafepointCheck(), JCC('ne', slow), Label(back)]
+
     def _load_as_int64(self, value: IRValue, dst: Register) -> list[Instruction]:
         """`value` in the 64-bit register `dst` names (by its 32-bit name), sign-extended if narrower."""
         load = self._gen_load_value(value, dst)
@@ -664,6 +673,8 @@ class InstructionSelector:
                 out.extend(self._gen_load_value(instr.value, Register('eax')))
                 out.append(self._cmp(instr.bound, instr.value))
                 out.append(Ja(self._bounds_fail(instr)))
+            elif isinstance(instr, IRSafepoint):
+                out.extend(self._safepoint(instr))
             else:
                 raise NotImplementedError(f"lower_ir has no rule for: {instr!r}")
         return out

@@ -492,6 +492,16 @@ class LeaQFrameSlot(Instruction):
 
 
 @dataclass
+class SafepointCheck(Instruction):
+    """`cmpb $0, hornet_preempt(%rip)`: whether the runtime asks the task to stop (the Emitter
+    applies the target's symbol naming)."""
+    flag: str = 'hornet_preempt'
+
+    def emit(self) -> str:
+        return f"cmpb    $0, {self.flag}(%rip)"
+
+
+@dataclass
 class CallInstr(Instruction):
     """Call a symbol; the Emitter applies the target's symbol naming."""
     target: str
